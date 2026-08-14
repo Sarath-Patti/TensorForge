@@ -82,4 +82,4 @@ class SGD(Optimizer):
                     update_step = d_p
 
                 new_p = p_np - lr * update_step
-                np.copyto(p.storage.to_numpy(), new_p.astype(p.dtype.numpy_dtype, copy=False))
+                np.copyto(p.storage.to_numpy(), new_p.reshape(-1).astype(p.dtype.numpy_dtype, copy=False))

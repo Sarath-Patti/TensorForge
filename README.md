@@ -4,10 +4,10 @@
 
 ---
 
-## Current Milestone: `v0.4 – Optimizers & Training Engine`
+## Current Milestone: `v0.5 – Native Runtime & Performance Foundation`
 
-> **Development Status:** `v0.4 (Active Milestone)`
-> TensorForge v0.4 introduces an end-to-end training and optimization subsystem: parameter optimizers (`SGD` with momentum and weight decay, `Adam` with bias correction), dataset abstractions (`Dataset`, `TensorDataset`), mini-batch `DataLoader`, evaluation metrics, and the `Trainer` loop orchestrator.
+> **Development Status:** `v0.5 (Active Milestone)`
+> TensorForge v0.5 introduces a clean C++17 native runtime layer beneath the Python Tensor and Storage abstractions. It provides an aligned CPU memory allocator, RAII-managed native `Storage` and `Tensor` abstractions, standalone CPU kernels (element-wise add, sub, mul, and cache-friendly matrix multiplication), optional `pybind11` bindings, and a standardized benchmark suite.
 
 ---
 
@@ -15,141 +15,95 @@
 
 TensorForge provides explicit control over memory representation, tensor operations, automatic differentiation, neural network composition, and model training without relying on external deep learning runtimes (such as PyTorch, TensorFlow, or JAX).
 
-In **v0.4**, TensorForge features:
+In **v0.5**, TensorForge features:
 - Core multi-dimensional `Tensor` abstraction with contiguous physical storage.
 - Custom reverse-mode automatic differentiation engine (`autograd`).
 - Neural network layers & activations (`Parameter`, `Module`, `Linear`, `ReLU`, `Sigmoid`, `Tanh`, `Softmax`, `MSELoss`, `CrossEntropyLoss`, `Sequential`).
-- **Optimization Subsystem (`tensorforge.optim`):**
-  - Base `Optimizer` with safe in-place parameter buffer updates preserving `is_leaf` status.
-  - `SGD` with momentum velocity accumulation and weight decay.
-  - `Adam` with running first/second moment estimation and analytical bias correction.
-- **Data Subsystem (`tensorforge.data`):**
-  - `Dataset` & `TensorDataset` indexing abstractions.
-  - `DataLoader` providing mini-batching, reproducible shuffling, and partial-batch controls.
-- **Training Engine (`tensorforge.training`):**
-  - `Trainer` supporting standard training loops (`model.train()`, `zero_grad()`, `loss.backward()`, `optimizer.step()`) and isolated evaluation passes (`model.eval()`, `no_grad()`).
-  - History logging (`train_loss`, `val_loss`, `train_acc`, `val_acc`).
+- Optimization & Training pipeline (`SGD`, `Adam`, `TensorDataset`, `DataLoader`, `Trainer`, `accuracy`).
+- **C++17 Native Runtime Subsystem (`native/`):**
+  - Aligned 64-byte `DefaultCPUAllocator` with active memory tracking.
+  - Native C++ `Storage` with RAII memory lifetime ownership.
+  - Native C++ `Tensor` and `Shape` representations preserving row-major contiguous layout.
+  - Handcrafted CPU compute kernels: element-wise arithmetic and cache-aware $(i, k, j)$ matrix multiplication.
+  - Optional `pybind11` bridge (`_tensorforge_native`) and `NativeStorage` Python backend.
+- **Benchmarking Suite (`benchmarks/`):**
+  - Matrix multiplication, element-wise arithmetic, and memory overhead benchmarks.
 
 ---
 
-## Training Pipeline Architecture
+## Native Runtime Architecture
 
 ```
-                    ┌─────────────────────────┐
-                    │     Dataset / Data      │
-                    │ - Dataset Base          │
-                    │ - TensorDataset         │
-                    └───────────┬─────────────┘
-                                │
-                    ┌───────────▼─────────────┐
-                    │       DataLoader        │
-                    │ - batching, shuffling   │
-                    │ - drop_last             │
-                    └───────────┬─────────────┘
-                                │ (x_batch, y_batch)
-                                ▼
-                    ┌─────────────────────────┐
-                    │      Model / Loss       │
-                    │ - prediction = model(x) │
-                    │ - loss = loss_fn(p, y)  │
-                    │ - loss.backward()       │
-                    └───────────┬─────────────┘
-                                │ param.grad
-                                ▼
-                    ┌─────────────────────────┐
-                    │    Optimizer Engine     │
-                    │ - SGD (momentum, wd)    │
-                    │ - Adam (beta1, beta2)   │
-                    │ - step(), zero_grad()   │
-                    └───────────┬─────────────┘
-                                │ (Updated parameters)
-                                ▼
-                    ┌─────────────────────────┐
-                    │      Trainer Loop       │
-                    │ - fit(train, val, ep)   │
-                    │ - evaluate()            │
-                    │ - accuracy, loss history│
-                    └─────────────────────────┘
+                  TensorForge
+                      │
+               Python Tensor API
+                      │
+                 Storage API
+                  /        \
+                 /          \
+        NumPyStorage      NativeStorage
+      (Default Backend) (Optional Backend)
+             │                 │
+           NumPy          C++17 Runtime
+                               │
+                     ┌─────────┴─────────┐
+                     │                   │
+                  Storage             Kernels
+                     │                   │
+                 Allocator           CPU Ops
+                                         │
+                                      Matmul
 ```
 
 ---
 
-## Supported Optimization & Training Components (v0.4)
+## Supported Native & Python Components (v0.5)
 
-| Component | Category | Description |
+| Component | Layer | Description |
 |---|---|---|
-| **`SGD`** | Optimizer | Stochastic Gradient Descent with optional momentum and L2 weight decay |
-| **`Adam`** | Optimizer | Adaptive Moment Estimation with bias correction |
-| **`Dataset`** | Data | Abstract base class for indexed datasets |
-| **`TensorDataset`** | Data | Wraps multi-field tensors indexing samples along dimension 0 |
-| **`DataLoader`** | Data | Mini-batch generator with shuffling and `drop_last` options |
-| **`Trainer`** | Training | Training and validation loop orchestrator with history logging |
-| **`accuracy`** | Metrics | Multi-class classification accuracy calculation |
+| **`DefaultCPUAllocator`** | Native C++ | 64-byte aligned memory allocator tracking active allocations |
+| **`Storage`** | Native C++ | RAII contiguous memory buffer on CPU |
+| **`Tensor`** | Native C++ | Lightweight native tensor with shape and stride metadata |
+| **`kernels::matmul`** | Native C++ | Cache-aware $(i, k, j)$ float32 matrix multiplication kernel |
+| **`kernels::add/sub/mul`** | Native C++ | Vectorized element-wise float32 operations |
+| **`NativeStorage`** | Python | Optional backend storage interfacing with C++ runtime |
+| **`NumPyStorage`** | Python | Reference contiguous storage backend (Default) |
+| **`profile`** | Python | Lightweight wall-clock profiling context manager |
 
 ---
 
-## Installation
+## Building the Native C++ Runtime
 
 ### Prerequisites
-- Python 3.11+
-- NumPy >= 1.24.0
+- CMake >= 3.15
+- C++17 compatible compiler (Clang, GCC, or MSVC)
+- pybind11 (optional, for Python C-extension bindings)
 
-### Installing from source
+### Standalone C++ Build
 ```bash
-# Clone the repository
-git clone https://github.com/Sarath-Patti/TensorForge.git
-cd TensorForge
+# Configure and build native C++ library and tests
+cmake -B native/build -S native -DCMAKE_BUILD_TYPE=Release
+cmake --build native/build
 
-# Install in editable mode
-pip install -e .
-
-# Install optional development dependencies (pytest)
-pip install -e ".[dev]"
+# Run standalone C++ native verification tests
+ctest --test-dir native/build --output-on-failure
 ```
 
 ---
 
-## Complete Training Example
+## Running Benchmarks & Demonstrations
 
-```python
-import numpy as np
-import tensorforge as tf
-from tensorforge.data import DataLoader, TensorDataset
-from tensorforge.nn import CrossEntropyLoss, Linear, ReLU, Sequential
-from tensorforge.optim import Adam
-from tensorforge.training import Trainer
-
-# 1. Generate synthetic dataset
-X = np.random.randn(200, 4).astype(np.float32)
-y = (X[:, 0] + X[:, 1] > 0).astype(np.int64)
-
-dataset = TensorDataset(tf.tensor(X), tf.tensor(y))
-train_loader = DataLoader(dataset, batch_size=32, shuffle=True)
-
-# 2. Define neural network model
-model = Sequential(
-    Linear(in_features=4, out_features=16),
-    ReLU(),
-    Linear(in_features=16, out_features=2),
-)
-
-# 3. Setup loss function and optimizer
-loss_fn = CrossEntropyLoss()
-optimizer = Adam(model.parameters(), lr=0.01)
-
-# 4. Train with Trainer
-trainer = Trainer(model=model, optimizer=optimizer, loss_fn=loss_fn)
-history = trainer.fit(train_loader=train_loader, epochs=10)
-
-print(f"Final training loss: {history['train_loss'][-1]:.4f}")
-print(f"Final training accuracy: {history['train_acc'][-1] * 100:.2f}%")
-```
-
-Run the included demonstration scripts:
 ```bash
-python examples/basic_tensor.py
-python examples/autograd_demo.py
-python examples/neural_network_demo.py
+# Matrix multiplication benchmark
+python benchmarks/benchmark_matmul.py
+
+# Element-wise operations benchmark
+python benchmarks/benchmark_elementwise.py
+
+# Memory introspection benchmark
+python benchmarks/benchmark_memory.py
+
+# End-to-end training demo
 python examples/training_demo.py
 ```
 
@@ -159,75 +113,52 @@ python examples/training_demo.py
 
 ```
 TensorForge/
+├── native/                          # NEW: Native C++17 Runtime
+│   ├── CMakeLists.txt               # CMake configuration
+│   ├── include/tensorforge/         # Public C++ headers
+│   │   ├── dtype.hpp                # DType enum & metadata
+│   │   ├── shape.hpp                # Shape & contiguous stride calculation
+│   │   ├── allocator.hpp            # Allocator interface & DefaultCPUAllocator
+│   │   ├── storage.hpp              # Native Storage RAII buffer
+│   │   ├── tensor.hpp               # Native Tensor metadata & buffer link
+│   │   └── kernels.hpp              # Element-wise and Matmul kernel declarations
+│   ├── src/                         # Native C++ implementations
+│   │   ├── dtype.cpp
+│   │   ├── shape.cpp
+│   │   ├── allocator.cpp
+│   │   ├── storage.cpp
+│   │   ├── tensor.cpp
+│   │   ├── kernels.cpp
+│   │   └── bindings.cpp             # pybind11 module bindings
+│   └── tests/
+│       └── test_native.cpp          # Standalone C++ test suite
+│
 ├── tensorforge/
-│   ├── __init__.py                  # Top-level exports & version
-│   │
-│   ├── optim/                       # Optimizer subsystem
-│   │   ├── __init__.py              # Optimizer exports
-│   │   ├── optimizer.py             # Optimizer base class
-│   │   ├── sgd.py                   # SGD with momentum & weight decay
-│   │   └── adam.py                  # Adam optimizer
-│   │
-│   ├── data/                        # Data loading subsystem
-│   │   ├── __init__.py              # Data exports
-│   │   ├── dataset.py               # Dataset & TensorDataset
-│   │   └── dataloader.py            # Mini-batch DataLoader
-│   │
-│   ├── training/                    # Training engine
-│   │   ├── __init__.py              # Training exports
-│   │   ├── trainer.py               # Trainer fit & evaluate loop
-│   │   └── metrics.py               # Accuracy & evaluation metrics
-│   │
-│   ├── nn/                          # Neural Network subsystem
-│   │   ├── __init__.py              # NN module exports
-│   │   ├── parameter.py             # Parameter class
-│   │   ├── module.py                # Base Module class
-│   │   ├── linear.py                # Dense Linear layer
-│   │   ├── activations.py           # ReLU, Sigmoid, Tanh, Softmax
-│   │   ├── losses.py                # MSELoss, CrossEntropyLoss
-│   │   ├── sequential.py            # Sequential container
-│   │   └── init.py                  # Parameter initialization
-│   │
-│   ├── autograd/                    # Automatic Differentiation engine
-│   │   ├── __init__.py              # Autograd exports
-│   │   ├── engine.py                # Topological sort & backward engine
-│   │   └── function.py              # Backward Node graph definitions
-│   │
-│   ├── tensor/                      # Core Tensor subsystem
-│   │   ├── __init__.py              # Tensor exports
-│   │   ├── tensor.py                # Core Tensor abstraction
-│   │   ├── dtype.py                 # DType registry & type promotions
-│   │   ├── shape.py                 # Shape, strides, broadcasting
-│   │   ├── storage.py               # Storage abstraction & NumPyStorage
-│   │   └── operations.py           # Differentiable tensor operations
-│   │
+│   ├── __init__.py                  # Top-level exports & version (0.5.0)
+│   ├── native/                      # NEW: Python native subpackage
+│   │   └── __init__.py              # Native availability & operations
+│   ├── optim/                       # Optimizer subsystem (SGD, Adam)
+│   ├── data/                        # Data loading subsystem (Dataset, DataLoader)
+│   ├── training/                    # Training loop & metrics (Trainer, accuracy)
+│   ├── nn/                          # Neural Network subsystem (Parameter, Module, Linear, etc.)
+│   ├── autograd/                    # Automatic Differentiation DAG engine
+│   ├── tensor/                      # Core Tensor subsystem (Tensor, Storage, NumPyStorage, NativeStorage)
 │   └── utils/
-│       ├── __init__.py              # Utility exports
-│       └── validation.py            # Error hierarchy & validators
+│       ├── __init__.py
+│       ├── validation.py
+│       └── profiling.py             # NEW: Profile context manager
 │
-├── tests/
-│   ├── optim/                       # Optimizer unit tests
-│   │   ├── test_optimizer.py
-│   │   ├── test_sgd.py
-│   │   └── test_adam.py
-│   │
-│   ├── data/                        # Data unit tests
-│   │   ├── test_dataset.py
-│   │   └── test_dataloader.py
-│   │
-│   ├── training/                    # Training unit tests
-│   │   ├── test_trainer.py
-│   │   └── test_metrics.py
-│   │
-│   ├── nn/                          # NN unit tests
-│   ├── autograd/                    # Autograd unit tests
-│   └── tensor/                      # Tensor core unit tests
+├── benchmarks/                      # NEW: Benchmark framework
+│   ├── README.md
+│   ├── benchmark_matmul.py
+│   ├── benchmark_elementwise.py
+│   └── benchmark_memory.py
 │
-├── examples/
-│   ├── basic_tensor.py              # Tensor core demo
-│   ├── autograd_demo.py             # Autograd demo
-│   ├── neural_network_demo.py       # Neural network demo
-│   └── training_demo.py             # End-to-end training demo
+├── examples/                        # Demonstrations
+│   ├── basic_tensor.py
+│   ├── autograd_demo.py
+│   ├── neural_network_demo.py
+│   └── training_demo.py
 │
 ├── README.md
 ├── pyproject.toml
@@ -243,8 +174,8 @@ TensorForge/
 | **v0.1 – Project Foundation & Tensor Core** | **Complete** | Tensor abstraction, metadata/storage decoupling, basic ops, broadcasting, dtype handling |
 | **v0.2 – Automatic Differentiation** | **Complete** | Reverse-mode autodiff DAG engine, topological backpropagation, broadcast reductions |
 | **v0.3 – Neural Network Modules & Layers** | **Complete** | Parameter, Module, Linear, Activations (ReLU, Sigmoid, Tanh, Softmax), Losses, Sequential |
-| **v0.4 – Optimizers & Training Pipeline** | **Current** | SGD, Adam, Dataset, DataLoader, Trainer, Metrics, Training History |
-| **v0.5 – Model Serialization & Checkpointing** | Planned | Memory-mapped weight serialization, state_dict format, format converters |
-| **v0.6 – C++ Inference Runtime & Custom Allocators** | Planned | Native C++ tensor engine, arena allocator, SIMD/AVX kernels, zero-copy Pybind11 integration |
+| **v0.4 – Optimizers & Training Pipeline** | **Complete** | SGD, Adam, Dataset, DataLoader, Trainer, Metrics, Training History |
+| **v0.5 – Native Runtime & Performance Foundation** | **Current** | C++17 runtime, CPU allocator, native storage, CPU kernels, benchmark suite |
+| **v0.6 – Advanced Inference Runtime & Allocators** | Planned | Memory arena allocators, SIMD/AVX vectorization, graph execution engine |
 | **v0.7 – Quantization & Graph Optimizations** | Planned | INT8/FP16 post-training quantization, operator fusion, constant folding |
 | **v0.8 – Production Inference Engine & C API** | Planned | High-throughput serving runtime, batching queue, C/C++ embedding API |

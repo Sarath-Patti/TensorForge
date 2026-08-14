@@ -18,7 +18,7 @@ class DummyOptimizer(Optimizer):
             for p in group["params"]:
                 if p.grad is not None:
                     new_val = p.numpy() - lr * p.grad.numpy()
-                    np.copyto(p.storage.to_numpy(), new_val.astype(p.dtype.numpy_dtype, copy=False))
+                    np.copyto(p.storage.to_numpy(), new_val.reshape(-1).astype(p.dtype.numpy_dtype, copy=False))
 
 
 class TestOptimizerBase(unittest.TestCase):

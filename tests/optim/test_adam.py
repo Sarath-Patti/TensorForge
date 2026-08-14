@@ -60,6 +60,15 @@ class TestAdam(unittest.TestCase):
         # w should converge to 5.0
         np.testing.assert_allclose(w.numpy(), [5.0], atol=1e-2)
 
+    def test_adam_multidimensional_parameter(self):
+        w = Parameter([[1.0, 2.0], [3.0, 4.0]], dtype=float32)
+        opt = Adam([w], lr=0.1)
+        w.grad = tensor([[0.5, 0.5], [1.0, 1.0]], dtype=float32)
+        opt.step()
+        self.assertEqual(w.shape, (2, 2))
+        self.assertEqual(w.storage.to_numpy().shape, (4,))
+
 
 if __name__ == "__main__":
     unittest.main()
+

@@ -1,6 +1,6 @@
 """TensorForge: A Memory-Aware Deep Learning Framework and Inference Engine."""
 
-from tensorforge import autograd, data, nn, optim, training
+from tensorforge import autograd, data, native, nn, optim, training
 from tensorforge.autograd.engine import backward, is_grad_enabled, no_grad
 from tensorforge.tensor.dtype import (
     DType,
@@ -15,6 +15,7 @@ from tensorforge.tensor.dtype import (
     to_dtype,
     uint8,
 )
+from tensorforge.tensor.native_storage import NativeStorage, is_native_available
 from tensorforge.tensor.operations import (
     add,
     argmax,
@@ -60,7 +61,7 @@ from tensorforge.utils.validation import (
     TensorForgeError,
 )
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 __all__ = [
     "__version__",
@@ -70,6 +71,7 @@ __all__ = [
     "optim",
     "data",
     "training",
+    "native",
     # Core
     "Tensor",
     "tensor",
@@ -97,6 +99,8 @@ __all__ = [
     # Storage & Shape
     "Storage",
     "NumPyStorage",
+    "NativeStorage",
+    "is_native_available",
     "compute_numel",
     "compute_contiguous_strides",
     "broadcast_shapes",

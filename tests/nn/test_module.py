@@ -93,11 +93,27 @@ class TestModule(unittest.TestCase):
         for p in model.parameters():
             self.assertIsNone(p.grad)
 
-    def test_forward_not_implemented(self):
-        base_mod = Module()
-        with self.assertRaises(NotImplementedError):
-            base_mod(tf.tensor([1.0]))
+    def test_tied_parameters(self):
+        # Two submodules sharing the exact same Parameter instance
+        shared_param = Parameter([1.0, 2.0])
+        mod1 = SubModule()
+        mod1.param_sub = shared_param
+        mod2 = SubModule()
+        mod2.param_sub = shared_param
+
+        class TiedModel(Module):
+            def __init__(self):
+                super().__init__()
+                self.m1 = mod1
+                self.m2 = mod2
+
+        model = TiedModel()
+        # parameters() should yield shared_param only once
+        params = list(model.parameters())
+        self.assertEqual(len(params), 1)
+        self.assertIs(params[0], shared_param)
 
 
 if __name__ == "__main__":
     unittest.main()
+

@@ -104,21 +104,24 @@ class Module:
         self,
         prefix: str = "",
         recurse: bool = True,
+        memo: Optional[Set[int]] = None,
     ) -> Iterator[Tuple[str, Parameter]]:
         """Return an iterator over module parameters, yielding both name and parameter.
 
         Args:
             prefix: Prefix to prepend to parameter names.
             recurse: If True, yields parameters of submodules recursively.
+            memo: Optional set of parameter object ids to prevent duplicate yields.
 
         Yields:
             (name, parameter) tuples.
         """
-        memo: Set[Parameter] = set()
+        if memo is None:
+            memo = set()
 
         for name, param in self._parameters.items():
-            if param is not None and param not in memo:
-                memo.add(param)
+            if param is not None and id(param) not in memo:
+                memo.add(id(param))
                 full_name = f"{prefix}.{name}" if prefix else name
                 yield full_name, param
 
@@ -126,10 +129,10 @@ class Module:
             for mod_name, module in self._modules.items():
                 if module is not None:
                     sub_prefix = f"{prefix}.{mod_name}" if prefix else mod_name
-                    for sub_name, sub_param in module.named_parameters(prefix=sub_prefix, recurse=True):
-                        if sub_param not in memo:
-                            memo.add(sub_param)
-                            yield sub_name, sub_param
+                    for sub_name, sub_param in module.named_parameters(
+                        prefix=sub_prefix, recurse=True, memo=memo
+                    ):
+                        yield sub_name, sub_param
 
     def modules(self) -> Iterator[Module]:
         """Return an iterator over all modules in the network (self and all child submodules)."""
@@ -138,21 +141,21 @@ class Module:
 
     def named_modules(
         self,
-        memo: Optional[Set[Module]] = None,
+        memo: Optional[Set[int]] = None,
         prefix: str = "",
     ) -> Iterator[Tuple[str, Module]]:
         """Return an iterator over all modules in the network, yielding both name and module."""
         if memo is None:
             memo = set()
 
-        if self not in memo:
-            memo.add(self)
+        if id(self) not in memo:
+            memo.add(id(self))
             yield prefix, self
             for name, module in self._modules.items():
                 if module is None:
                     continue
                 sub_prefix = f"{prefix}.{name}" if prefix else name
-                for sub_name, sub_mod in module.named_modules(memo, sub_prefix):
+                for sub_name, sub_mod in module.named_modules(memo=memo, prefix=sub_prefix):
                     yield sub_name, sub_mod
 
     def zero_grad(self) -> None:

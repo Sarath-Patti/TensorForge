@@ -76,6 +76,15 @@ class TestSGD(unittest.TestCase):
         # w should converge close to 3.0
         np.testing.assert_allclose(w.numpy(), [3.0], atol=1e-3)
 
+    def test_sgd_multidimensional_parameter(self):
+        w = Parameter([[1.0, 2.0], [3.0, 4.0]], dtype=float32)
+        opt = SGD([w], lr=0.1)
+        w.grad = tensor([[0.5, 0.5], [1.0, 1.0]], dtype=float32)
+        opt.step()
+        self.assertEqual(w.shape, (2, 2))
+        np.testing.assert_allclose(w.numpy(), [[0.95, 1.95], [2.9, 3.9]])
+
 
 if __name__ == "__main__":
     unittest.main()
+

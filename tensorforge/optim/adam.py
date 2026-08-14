@@ -101,4 +101,4 @@ class Adam(Optimizer):
 
                 update_step = step_size * (exp_avg / denom)
                 new_p = p_np - update_step
-                np.copyto(p.storage.to_numpy(), new_p.astype(p.dtype.numpy_dtype, copy=False))
+                np.copyto(p.storage.to_numpy(), new_p.reshape(-1).astype(p.dtype.numpy_dtype, copy=False))

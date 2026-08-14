@@ -32,6 +32,7 @@ from tensorforge.tensor.shape import (
     compute_numel,
     is_c_contiguous,
 )
+from tensorforge.tensor.native_storage import NativeStorage
 from tensorforge.tensor.storage import NumPyStorage, Storage
 from tensorforge.tensor.tensor import (
     Tensor,
@@ -67,6 +68,7 @@ __all__ = [
     # Storage
     "Storage",
     "NumPyStorage",
+    "NativeStorage",
     # Shape & Strides
     "compute_numel",
     "compute_contiguous_strides",
