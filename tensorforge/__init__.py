@@ -1,6 +1,6 @@
 """TensorForge: A Memory-Aware Deep Learning Framework and Inference Engine."""
 
-from tensorforge import autograd, nn
+from tensorforge import autograd, data, nn, optim, training
 from tensorforge.autograd.engine import backward, is_grad_enabled, no_grad
 from tensorforge.tensor.dtype import (
     DType,
@@ -17,6 +17,7 @@ from tensorforge.tensor.dtype import (
 )
 from tensorforge.tensor.operations import (
     add,
+    argmax,
     cross_entropy,
     exp,
     log,
@@ -59,13 +60,16 @@ from tensorforge.utils.validation import (
     TensorForgeError,
 )
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 __all__ = [
     "__version__",
     # Subpackages
     "nn",
     "autograd",
+    "optim",
+    "data",
+    "training",
     # Core
     "Tensor",
     "tensor",
@@ -115,6 +119,7 @@ __all__ = [
     "softmax",
     "pow",
     "cross_entropy",
+    "argmax",
     # Errors
     "TensorForgeError",
     "ShapeError",

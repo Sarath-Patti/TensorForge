@@ -651,3 +651,23 @@ def cross_entropy(
 
     return res_tensor
 
+
+def argmax(a: Tensor, axis: int = -1, keepdims: bool = False) -> Tensor:
+    """Return indices of the maximum values along the specified axis.
+
+    Args:
+        a: Input tensor.
+        axis: Axis along which to find maximum indices (default: -1).
+        keepdims: If True, the reduced axis is retained with length 1.
+
+    Returns:
+        Integer Tensor containing argmax indices.
+    """
+    from tensorforge.tensor.dtype import int64
+    from tensorforge.tensor.tensor import Tensor
+
+    norm_axis = validate_axis(axis, a.ndim)
+    res_arr = np.argmax(a.numpy(), axis=norm_axis, keepdims=keepdims)
+    return Tensor(res_arr, dtype=int64, copy=False, requires_grad=False)
+
+

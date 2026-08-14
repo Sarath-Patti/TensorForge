@@ -447,6 +447,11 @@ class Tensor:
         from tensorforge.tensor.operations import pow as _pow
         return _pow(self, exponent)
 
+    def argmax(self, axis: int = -1, keepdims: bool = False) -> Tensor:
+        """Return indices of maximum values along the specified axis."""
+        from tensorforge.tensor.operations import argmax as _argmax
+        return _argmax(self, axis=axis, keepdims=keepdims)
+
     def __neg__(self) -> Tensor:
         from tensorforge.tensor.operations import neg
         return neg(self)

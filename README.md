@@ -4,93 +4,87 @@
 
 ---
 
-## Current Milestone: `v0.3 – Neural Network Modules`
+## Current Milestone: `v0.4 – Optimizers & Training Engine`
 
-> **Development Status:** `v0.3 (Active Milestone)`
-> TensorForge v0.3 introduces an object-oriented neural network architecture (`tensorforge.nn`) with `Module` base class, `Parameter` abstraction, dense `Linear` layers, activation modules (`ReLU`, `Sigmoid`, `Tanh`, `Softmax`), loss functions (`MSELoss`, `CrossEntropyLoss`), and the `Sequential` container, fully integrated with TensorForge's custom reverse-mode automatic differentiation engine.
+> **Development Status:** `v0.4 (Active Milestone)`
+> TensorForge v0.4 introduces an end-to-end training and optimization subsystem: parameter optimizers (`SGD` with momentum and weight decay, `Adam` with bias correction), dataset abstractions (`Dataset`, `TensorDataset`), mini-batch `DataLoader`, evaluation metrics, and the `Trainer` loop orchestrator.
 
 ---
 
 ## Project Overview
 
-TensorForge provides explicit control over memory representation, tensor operations, automatic differentiation, and neural network construction without relying on external deep learning runtimes (such as PyTorch, TensorFlow, or JAX).
+TensorForge provides explicit control over memory representation, tensor operations, automatic differentiation, neural network composition, and model training without relying on external deep learning runtimes (such as PyTorch, TensorFlow, or JAX).
 
-In **v0.3**, TensorForge features:
+In **v0.4**, TensorForge features:
 - Core multi-dimensional `Tensor` abstraction with contiguous physical storage.
 - Custom reverse-mode automatic differentiation engine (`autograd`).
-- Dynamic computational graph construction with iterative topological backpropagation.
-- Object-oriented neural network layer (`tensorforge.nn`):
-  - `Parameter`: trainable tensor representation with automatic gradient tracking.
-  - `Module`: base class with recursive parameter discovery, submodule registration, `train()` / `eval()` state, and `zero_grad()`.
-  - `Linear`: dense fully-connected layer ($y = xW^T + b$) with uniform parameter initialization.
-  - Activation modules: `ReLU`, `Sigmoid`, `Tanh`, and `Softmax`.
-  - Loss functions: `MSELoss` and numerically stable `CrossEntropyLoss`.
-  - `Sequential`: in-order composable module container.
+- Neural network layers & activations (`Parameter`, `Module`, `Linear`, `ReLU`, `Sigmoid`, `Tanh`, `Softmax`, `MSELoss`, `CrossEntropyLoss`, `Sequential`).
+- **Optimization Subsystem (`tensorforge.optim`):**
+  - Base `Optimizer` with safe in-place parameter buffer updates preserving `is_leaf` status.
+  - `SGD` with momentum velocity accumulation and weight decay.
+  - `Adam` with running first/second moment estimation and analytical bias correction.
+- **Data Subsystem (`tensorforge.data`):**
+  - `Dataset` & `TensorDataset` indexing abstractions.
+  - `DataLoader` providing mini-batching, reproducible shuffling, and partial-batch controls.
+- **Training Engine (`tensorforge.training`):**
+  - `Trainer` supporting standard training loops (`model.train()`, `zero_grad()`, `loss.backward()`, `optimizer.step()`) and isolated evaluation passes (`model.eval()`, `no_grad()`).
+  - History logging (`train_loss`, `val_loss`, `train_acc`, `val_acc`).
 
 ---
 
-## Framework Architecture
+## Training Pipeline Architecture
 
 ```
-                       ┌─────────────────────────┐
-                       │     Tensor (Metadata)   │
-                       │  - shape, strides, dtype│
-                       └────────────┬────────────┘
-                                    │ owns
-                       ┌────────────▼────────────┐
-                       │ Storage (Contiguous Buf)│
-                       │  - NumPyStorage         │
-                       └────────────┬────────────┘
-                                    │
-                       ┌────────────▼────────────┐
-                       │     Autograd Engine     │
-                       │  - DAG / Topological DFS│
-                       │  - Gradient accumulation│
-                       └────────────┬────────────┘
-                                    │
-                       ┌────────────▼────────────┐
-                       │      Module Base        │
-                       │  - parameters()         │
-                       │  - named_parameters()   │
-                       │  - zero_grad(), train() │
-                       └──────┬───────────┬──────┘
-                              │           │
-           ┌──────────────────┴───┐   ┌───┴──────────────────┐
-           │                      │   │                      │
-   ┌───────▼────────┐     ┌───────▼───▼────┐         ┌───────▼────────┐
-   │   Parameter    │     │  Linear Layer  │         │   Sequential   │
-   │  - requires_grad│    │  - weight, bias│         │  - child mods  │
-   └────────────────┘     └────────────────┘         └────────────────┘
-                                  │
-                          ┌───────▼────────┐
-                          │  Activations   │
-                          │ - ReLU, Sigmoid│
-                          │ - Tanh, Softmax│
-                          └───────┬────────┘
-                                  │
-                          ┌───────▼────────┐
-                          │ Loss Functions │
-                          │ - MSELoss      │
-                          │ - CrossEntropy │
-                          └────────────────┘
+                    ┌─────────────────────────┐
+                    │     Dataset / Data      │
+                    │ - Dataset Base          │
+                    │ - TensorDataset         │
+                    └───────────┬─────────────┘
+                                │
+                    ┌───────────▼─────────────┐
+                    │       DataLoader        │
+                    │ - batching, shuffling   │
+                    │ - drop_last             │
+                    └───────────┬─────────────┘
+                                │ (x_batch, y_batch)
+                                ▼
+                    ┌─────────────────────────┐
+                    │      Model / Loss       │
+                    │ - prediction = model(x) │
+                    │ - loss = loss_fn(p, y)  │
+                    │ - loss.backward()       │
+                    └───────────┬─────────────┘
+                                │ param.grad
+                                ▼
+                    ┌─────────────────────────┐
+                    │    Optimizer Engine     │
+                    │ - SGD (momentum, wd)    │
+                    │ - Adam (beta1, beta2)   │
+                    │ - step(), zero_grad()   │
+                    └───────────┬─────────────┘
+                                │ (Updated parameters)
+                                ▼
+                    ┌─────────────────────────┐
+                    │      Trainer Loop       │
+                    │ - fit(train, val, ep)   │
+                    │ - evaluate()            │
+                    │ - accuracy, loss history│
+                    └─────────────────────────┘
 ```
 
 ---
 
-## Supported Neural Network Components (v0.3)
+## Supported Optimization & Training Components (v0.4)
 
-| Component | Description | Forward Mathematical Formulation |
+| Component | Category | Description |
 |---|---|---|
-| **`Parameter`** | Trainable model parameter | Wraps `Tensor` with `requires_grad=True` |
-| **`Module`** | Base layer / model abstraction | Manages parameters, submodules, and state |
-| **`Linear`** | Dense fully-connected layer | $y = x W^T + b$ |
-| **`ReLU`** | Rectified linear unit activation | $y = \max(0, x)$ |
-| **`Sigmoid`** | Logistic sigmoid activation | $y = \frac{1}{1 + \exp(-x)}$ |
-| **`Tanh`** | Hyperbolic tangent activation | $y = \tanh(x)$ |
-| **`Softmax`** | Normalized probability distribution | $S_i = \frac{\exp(x_i - \max(x))}{\sum_j \exp(x_j - \max(x))}$ |
-| **`MSELoss`** | Mean squared error loss | $L = \text{mean}((y_{\text{pred}} - y_{\text{true}})^2)$ |
-| **`CrossEntropyLoss`** | Multi-class cross-entropy loss | $L = -\frac{1}{N} \sum_{i=1}^N \log P(y_i)$ (stable log-sum-exp) |
-| **`Sequential`** | Sequential module pipeline | $y = f_n(\dots f_2(f_1(x)))$ |
+| **`SGD`** | Optimizer | Stochastic Gradient Descent with optional momentum and L2 weight decay |
+| **`Adam`** | Optimizer | Adaptive Moment Estimation with bias correction |
+| **`Dataset`** | Data | Abstract base class for indexed datasets |
+| **`TensorDataset`** | Data | Wraps multi-field tensors indexing samples along dimension 0 |
+| **`DataLoader`** | Data | Mini-batch generator with shuffling and `drop_last` options |
+| **`Trainer`** | Training | Training and validation loop orchestrator with history logging |
+| **`accuracy`** | Metrics | Multi-class classification accuracy calculation |
 
 ---
 
@@ -115,45 +109,40 @@ pip install -e ".[dev]"
 
 ---
 
-## Basic Usage
+## Complete Training Example
 
-### Building and Training a Neural Network
 ```python
+import numpy as np
 import tensorforge as tf
+from tensorforge.data import DataLoader, TensorDataset
 from tensorforge.nn import CrossEntropyLoss, Linear, ReLU, Sequential
+from tensorforge.optim import Adam
+from tensorforge.training import Trainer
 
-# 1. Define network architecture
+# 1. Generate synthetic dataset
+X = np.random.randn(200, 4).astype(np.float32)
+y = (X[:, 0] + X[:, 1] > 0).astype(np.int64)
+
+dataset = TensorDataset(tf.tensor(X), tf.tensor(y))
+train_loader = DataLoader(dataset, batch_size=32, shuffle=True)
+
+# 2. Define neural network model
 model = Sequential(
-    Linear(in_features=4, out_features=8),
+    Linear(in_features=4, out_features=16),
     ReLU(),
-    Linear(in_features=8, out_features=3),
+    Linear(in_features=16, out_features=2),
 )
 
-# 2. Input data and ground truth targets
-x = tf.tensor([
-    [0.1, 0.2, 0.3, 0.4],
-    [1.0, 0.5, -0.2, 0.8],
-    [-0.5, 1.2, 0.0, -0.3],
-], dtype=tf.float32)
-targets = [0, 2, 1]
+# 3. Setup loss function and optimizer
+loss_fn = CrossEntropyLoss()
+optimizer = Adam(model.parameters(), lr=0.01)
 
-# 3. Forward pass
-logits = model(x)
+# 4. Train with Trainer
+trainer = Trainer(model=model, optimizer=optimizer, loss_fn=loss_fn)
+history = trainer.fit(train_loader=train_loader, epochs=10)
 
-# 4. Compute loss
-criterion = CrossEntropyLoss()
-loss = criterion(logits, targets)
-print(f"Loss: {loss.item():.4f}")
-
-# 5. Backpropagation
-loss.backward()
-
-# 6. Inspect gradients on parameters
-for name, param in model.named_parameters():
-    print(f"{name} grad shape: {param.grad.shape}")
-
-# 7. Reset gradients
-model.zero_grad()
+print(f"Final training loss: {history['train_loss'][-1]:.4f}")
+print(f"Final training accuracy: {history['train_acc'][-1] * 100:.2f}%")
 ```
 
 Run the included demonstration scripts:
@@ -161,6 +150,7 @@ Run the included demonstration scripts:
 python examples/basic_tensor.py
 python examples/autograd_demo.py
 python examples/neural_network_demo.py
+python examples/training_demo.py
 ```
 
 ---
@@ -172,6 +162,22 @@ TensorForge/
 ├── tensorforge/
 │   ├── __init__.py                  # Top-level exports & version
 │   │
+│   ├── optim/                       # Optimizer subsystem
+│   │   ├── __init__.py              # Optimizer exports
+│   │   ├── optimizer.py             # Optimizer base class
+│   │   ├── sgd.py                   # SGD with momentum & weight decay
+│   │   └── adam.py                  # Adam optimizer
+│   │
+│   ├── data/                        # Data loading subsystem
+│   │   ├── __init__.py              # Data exports
+│   │   ├── dataset.py               # Dataset & TensorDataset
+│   │   └── dataloader.py            # Mini-batch DataLoader
+│   │
+│   ├── training/                    # Training engine
+│   │   ├── __init__.py              # Training exports
+│   │   ├── trainer.py               # Trainer fit & evaluate loop
+│   │   └── metrics.py               # Accuracy & evaluation metrics
+│   │
 │   ├── nn/                          # Neural Network subsystem
 │   │   ├── __init__.py              # NN module exports
 │   │   ├── parameter.py             # Parameter class
@@ -180,7 +186,7 @@ TensorForge/
 │   │   ├── activations.py           # ReLU, Sigmoid, Tanh, Softmax
 │   │   ├── losses.py                # MSELoss, CrossEntropyLoss
 │   │   ├── sequential.py            # Sequential container
-│   │   └── init.py                  # Parameter initialization utilities
+│   │   └── init.py                  # Parameter initialization
 │   │
 │   ├── autograd/                    # Automatic Differentiation engine
 │   │   ├── __init__.py              # Autograd exports
@@ -200,28 +206,28 @@ TensorForge/
 │       └── validation.py            # Error hierarchy & validators
 │
 ├── tests/
+│   ├── optim/                       # Optimizer unit tests
+│   │   ├── test_optimizer.py
+│   │   ├── test_sgd.py
+│   │   └── test_adam.py
+│   │
+│   ├── data/                        # Data unit tests
+│   │   ├── test_dataset.py
+│   │   └── test_dataloader.py
+│   │
+│   ├── training/                    # Training unit tests
+│   │   ├── test_trainer.py
+│   │   └── test_metrics.py
+│   │
 │   ├── nn/                          # NN unit tests
-│   │   ├── test_parameter.py
-│   │   ├── test_module.py
-│   │   ├── test_linear.py
-│   │   ├── test_activations.py
-│   │   ├── test_losses.py
-│   │   └── test_sequential.py
-│   │
 │   ├── autograd/                    # Autograd unit tests
-│   │   ├── test_utils.py            # Finite-difference gradient checker
-│   │   ├── test_basic_autograd.py
-│   │   ├── test_broadcast_gradients.py
-│   │   ├── test_matmul_gradients.py
-│   │   └── test_reduction_gradients.py
-│   │
-│   └── tensor/
-│       └── test_tensor.py           # Tensor core unit tests
+│   └── tensor/                      # Tensor core unit tests
 │
 ├── examples/
 │   ├── basic_tensor.py              # Tensor core demo
 │   ├── autograd_demo.py             # Autograd demo
-│   └── neural_network_demo.py       # Neural network demo
+│   ├── neural_network_demo.py       # Neural network demo
+│   └── training_demo.py             # End-to-end training demo
 │
 ├── README.md
 ├── pyproject.toml
@@ -236,8 +242,8 @@ TensorForge/
 |---|---|---|
 | **v0.1 – Project Foundation & Tensor Core** | **Complete** | Tensor abstraction, metadata/storage decoupling, basic ops, broadcasting, dtype handling |
 | **v0.2 – Automatic Differentiation** | **Complete** | Reverse-mode autodiff DAG engine, topological backpropagation, broadcast reductions |
-| **v0.3 – Neural Network Modules & Layers** | **Current** | Parameter, Module, Linear, Activations (ReLU, Sigmoid, Tanh, Softmax), Losses, Sequential |
-| **v0.4 – Optimizers & Training Pipeline** | Planned | SGD, Adam, AdamW, learning rate schedulers, dataloaders, training loops |
+| **v0.3 – Neural Network Modules & Layers** | **Complete** | Parameter, Module, Linear, Activations (ReLU, Sigmoid, Tanh, Softmax), Losses, Sequential |
+| **v0.4 – Optimizers & Training Pipeline** | **Current** | SGD, Adam, Dataset, DataLoader, Trainer, Metrics, Training History |
 | **v0.5 – Model Serialization & Checkpointing** | Planned | Memory-mapped weight serialization, state_dict format, format converters |
 | **v0.6 – C++ Inference Runtime & Custom Allocators** | Planned | Native C++ tensor engine, arena allocator, SIMD/AVX kernels, zero-copy Pybind11 integration |
 | **v0.7 – Quantization & Graph Optimizations** | Planned | INT8/FP16 post-training quantization, operator fusion, constant folding |
