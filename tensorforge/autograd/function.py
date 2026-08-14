@@ -415,3 +415,168 @@ class TransposeBackward(Node):
             return (grad_output.transpose(),)
 
         return (grad_output.transpose(*self.inv_axes),)
+
+
+class ExpBackward(Node):
+    """Backward rule for exponential: z = exp(a) -> dz/da = exp(a)."""
+
+    def __init__(self, a: Tensor, out: Tensor) -> None:
+        super().__init__("ExpBackward", (a,))
+        self.saved_out: Tensor = out.detach()
+
+    def backward(self, grad_output: Tensor) -> Tuple[Optional[Tensor], ...]:
+        if not self.needs_input_grad[0]:
+            return (None,)
+        return (grad_output * self.saved_out,)
+
+
+class LogBackward(Node):
+    """Backward rule for natural logarithm: z = log(a) -> dz/da = 1 / a."""
+
+    def __init__(self, a: Tensor) -> None:
+        super().__init__("LogBackward", (a,))
+        self.saved_a: Tensor = a.detach()
+
+    def backward(self, grad_output: Tensor) -> Tuple[Optional[Tensor], ...]:
+        if not self.needs_input_grad[0]:
+            return (None,)
+        return (grad_output / self.saved_a,)
+
+
+class ReluBackward(Node):
+    """Backward rule for rectified linear unit: z = relu(a) -> dz/da = 1 if a > 0 else 0."""
+
+    def __init__(self, a: Tensor) -> None:
+        super().__init__("ReluBackward", (a,))
+        self.saved_a: Tensor = a.detach()
+
+    def backward(self, grad_output: Tensor) -> Tuple[Optional[Tensor], ...]:
+        if not self.needs_input_grad[0]:
+            return (None,)
+        from tensorforge.tensor.tensor import Tensor
+
+        mask = (self.saved_a.numpy() > 0).astype(grad_output.dtype.numpy_dtype)
+        res_arr = grad_output.numpy() * mask
+        return (Tensor(res_arr, dtype=grad_output.dtype),)
+
+
+class SigmoidBackward(Node):
+    """Backward rule for sigmoid: z = sigmoid(a) -> dz/da = z * (1 - z)."""
+
+    def __init__(self, a: Tensor, out: Tensor) -> None:
+        super().__init__("SigmoidBackward", (a,))
+        self.saved_out: Tensor = out.detach()
+
+    def backward(self, grad_output: Tensor) -> Tuple[Optional[Tensor], ...]:
+        if not self.needs_input_grad[0]:
+            return (None,)
+        from tensorforge.tensor.tensor import Tensor
+
+        s = self.saved_out.numpy()
+        ds = s * (1.0 - s)
+        res_arr = grad_output.numpy() * ds
+        return (Tensor(res_arr, dtype=grad_output.dtype),)
+
+
+class TanhBackward(Node):
+    """Backward rule for hyperbolic tangent: z = tanh(a) -> dz/da = 1 - z^2."""
+
+    def __init__(self, a: Tensor, out: Tensor) -> None:
+        super().__init__("TanhBackward", (a,))
+        self.saved_out: Tensor = out.detach()
+
+    def backward(self, grad_output: Tensor) -> Tuple[Optional[Tensor], ...]:
+        if not self.needs_input_grad[0]:
+            return (None,)
+        from tensorforge.tensor.tensor import Tensor
+
+        t = self.saved_out.numpy()
+        dt = 1.0 - t * t
+        res_arr = grad_output.numpy() * dt
+        return (Tensor(res_arr, dtype=grad_output.dtype),)
+
+
+class SoftmaxBackward(Node):
+    """Backward rule for softmax: S = softmax(a) -> dz/da = S * (grad - sum(S * grad))."""
+
+    def __init__(self, a: Tensor, out: Tensor, dim: int = -1) -> None:
+        super().__init__("SoftmaxBackward", (a,))
+        self.saved_out: Tensor = out.detach()
+        self.dim: int = dim if dim >= 0 else dim + a.ndim
+
+    def backward(self, grad_output: Tensor) -> Tuple[Optional[Tensor], ...]:
+        if not self.needs_input_grad[0]:
+            return (None,)
+        s = self.saved_out
+        sum_term = (grad_output * s).sum(axis=self.dim, keepdims=True)
+        return (s * (grad_output - sum_term),)
+
+
+class PowBackward(Node):
+    """Backward rule for scalar power: z = a^p -> dz/da = p * a^(p - 1)."""
+
+    def __init__(self, a: Tensor, exponent: Union[float, int]) -> None:
+        super().__init__("PowBackward", (a,))
+        self.saved_a: Tensor = a.detach()
+        self.exponent: float = float(exponent)
+
+    def backward(self, grad_output: Tensor) -> Tuple[Optional[Tensor], ...]:
+        if not self.needs_input_grad[0]:
+            return (None,)
+        from tensorforge.tensor.tensor import Tensor
+
+        arr_a = self.saved_a.numpy()
+        d_power = self.exponent * np.power(arr_a, self.exponent - 1.0)
+        res_arr = grad_output.numpy() * d_power
+        return (Tensor(res_arr, dtype=grad_output.dtype),)
+
+
+class CrossEntropyBackward(Node):
+    """Backward rule for multiclass cross-entropy loss with class indices."""
+
+    def __init__(
+        self,
+        logits: Tensor,
+        probs: np.ndarray,
+        targets: np.ndarray,
+        reduction: str = "mean",
+        is_1d: bool = False,
+    ) -> None:
+        super().__init__("CrossEntropyBackward", (logits,))
+        self.probs: np.ndarray = probs  # (N, C)
+        self.targets: np.ndarray = targets  # (N,)
+        self.reduction: str = reduction
+        self.is_1d: bool = is_1d
+        self.orig_shape: Tuple[int, ...] = logits.shape
+        self.orig_dtype = logits.dtype
+
+    def backward(self, grad_output: Tensor) -> Tuple[Optional[Tensor], ...]:
+        if not self.needs_input_grad[0]:
+            return (None,)
+        from tensorforge.tensor.tensor import Tensor
+
+        num_samples = self.probs.shape[0]
+        grad_np = self.probs.copy()  # (N, C)
+
+        # Subtract 1 at target class index
+        for i, target_cls in enumerate(self.targets):
+            if 0 <= target_cls < grad_np.shape[1]:
+                grad_np[i, target_cls] -= 1.0
+
+        if self.reduction == "mean":
+            grad_np /= float(num_samples)
+        elif self.reduction == "none":
+            # If reduction='none', grad_output has shape (N,)
+            g_out_np = grad_output.numpy().reshape(-1, 1)
+            grad_np *= g_out_np
+
+        if self.reduction in ("mean", "sum"):
+            # grad_output is scalar
+            scale = grad_output.item()
+            grad_np *= scale
+
+        if self.is_1d:
+            grad_np = grad_np.reshape(self.orig_shape)
+
+        return (Tensor(grad_np, dtype=self.orig_dtype),)
+

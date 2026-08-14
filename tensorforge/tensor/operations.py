@@ -13,6 +13,7 @@ import numpy as np
 from tensorforge.tensor.dtype import DType, float32, promote_dtypes, to_dtype
 from tensorforge.utils.validation import (
     DimensionError,
+    IndexError_,
     ShapeError,
     validate_axis,
     validate_broadcast_shapes,
@@ -390,3 +391,263 @@ def mean(
         result_tensor.requires_grad = True
 
     return result_tensor
+
+
+def exp(a: Tensor) -> Tensor:
+    """Element-wise exponential: z = exp(a).
+
+    Args:
+        a: Input tensor.
+
+    Returns:
+        A new Tensor containing exponential of elements.
+    """
+    from tensorforge.autograd.engine import is_grad_enabled
+    from tensorforge.autograd.function import ExpBackward
+    from tensorforge.tensor.tensor import Tensor
+
+    out_dtype = a.dtype if a.dtype.is_floating_point else float32
+    res_arr = np.exp(a.numpy().astype(out_dtype.numpy_dtype, copy=False))
+    result_tensor = Tensor(res_arr, dtype=out_dtype)
+
+    if is_grad_enabled() and a.requires_grad:
+        result_tensor.grad_fn = ExpBackward(a, result_tensor)
+        result_tensor.requires_grad = True
+
+    return result_tensor
+
+
+def log(a: Tensor) -> Tensor:
+    """Element-wise natural logarithm: z = log(a).
+
+    Args:
+        a: Input tensor (must contain positive numbers).
+
+    Returns:
+        A new Tensor containing natural log of elements.
+    """
+    from tensorforge.autograd.engine import is_grad_enabled
+    from tensorforge.autograd.function import LogBackward
+    from tensorforge.tensor.tensor import Tensor
+
+    out_dtype = a.dtype if a.dtype.is_floating_point else float32
+    res_arr = np.log(a.numpy().astype(out_dtype.numpy_dtype, copy=False))
+    result_tensor = Tensor(res_arr, dtype=out_dtype)
+
+    if is_grad_enabled() and a.requires_grad:
+        result_tensor.grad_fn = LogBackward(a)
+        result_tensor.requires_grad = True
+
+    return result_tensor
+
+
+def relu(a: Tensor) -> Tensor:
+    """Rectified Linear Unit activation: z = max(0, a).
+
+    Args:
+        a: Input tensor.
+
+    Returns:
+        A new Tensor with negative values clamped to 0.
+    """
+    from tensorforge.autograd.engine import is_grad_enabled
+    from tensorforge.autograd.function import ReluBackward
+    from tensorforge.tensor.tensor import Tensor
+
+    res_arr = np.maximum(a.numpy(), 0)
+    result_tensor = Tensor(res_arr, dtype=a.dtype)
+
+    if is_grad_enabled() and a.requires_grad:
+        result_tensor.grad_fn = ReluBackward(a)
+        result_tensor.requires_grad = True
+
+    return result_tensor
+
+
+def sigmoid(a: Tensor) -> Tensor:
+    """Logistic sigmoid activation: z = 1 / (1 + exp(-a)).
+
+    Args:
+        a: Input tensor.
+
+    Returns:
+        A new Tensor with sigmoid activated values in range (0, 1).
+    """
+    from tensorforge.autograd.engine import is_grad_enabled
+    from tensorforge.autograd.function import SigmoidBackward
+    from tensorforge.tensor.tensor import Tensor
+
+    out_dtype = a.dtype if a.dtype.is_floating_point else float32
+    arr = a.numpy().astype(out_dtype.numpy_dtype, copy=False)
+    # Numerically stable logistic sigmoid
+    res_arr = np.where(arr >= 0, 1.0 / (1.0 + np.exp(-arr)), np.exp(arr) / (1.0 + np.exp(arr)))
+    result_tensor = Tensor(res_arr, dtype=out_dtype)
+
+    if is_grad_enabled() and a.requires_grad:
+        result_tensor.grad_fn = SigmoidBackward(a, result_tensor)
+        result_tensor.requires_grad = True
+
+    return result_tensor
+
+
+def tanh(a: Tensor) -> Tensor:
+    """Hyperbolic tangent activation: z = tanh(a).
+
+    Args:
+        a: Input tensor.
+
+    Returns:
+        A new Tensor with tanh activated values in range (-1, 1).
+    """
+    from tensorforge.autograd.engine import is_grad_enabled
+    from tensorforge.autograd.function import TanhBackward
+    from tensorforge.tensor.tensor import Tensor
+
+    out_dtype = a.dtype if a.dtype.is_floating_point else float32
+    res_arr = np.tanh(a.numpy().astype(out_dtype.numpy_dtype, copy=False))
+    result_tensor = Tensor(res_arr, dtype=out_dtype)
+
+    if is_grad_enabled() and a.requires_grad:
+        result_tensor.grad_fn = TanhBackward(a, result_tensor)
+        result_tensor.requires_grad = True
+
+    return result_tensor
+
+
+def softmax(a: Tensor, dim: int = -1) -> Tensor:
+    """Softmax activation along specified dimension: S = exp(a_i) / sum(exp(a_j)).
+
+    Args:
+        a: Input tensor.
+        dim: Dimension along which softmax is computed (default: -1).
+
+    Returns:
+        A new Tensor with normalized probabilities summing to 1 along `dim`.
+    """
+    from tensorforge.autograd.engine import is_grad_enabled
+    from tensorforge.autograd.function import SoftmaxBackward
+    from tensorforge.tensor.tensor import Tensor
+
+    norm_dim = validate_axis(dim, a.ndim)
+    out_dtype = a.dtype if a.dtype.is_floating_point else float32
+    arr = a.numpy().astype(out_dtype.numpy_dtype, copy=False)
+
+    # Subtract max for numerical stability
+    max_val = np.max(arr, axis=norm_dim, keepdims=True)
+    exp_arr = np.exp(arr - max_val)
+    sum_exp = np.sum(exp_arr, axis=norm_dim, keepdims=True)
+    res_arr = exp_arr / sum_exp
+    result_tensor = Tensor(res_arr, dtype=out_dtype)
+
+    if is_grad_enabled() and a.requires_grad:
+        result_tensor.grad_fn = SoftmaxBackward(a, result_tensor, dim=norm_dim)
+        result_tensor.requires_grad = True
+
+    return result_tensor
+
+
+def pow(a: Tensor, exponent: Union[float, int]) -> Tensor:
+    """Element-wise power: z = a^exponent.
+
+    Args:
+        a: Input tensor.
+        exponent: Scalar power.
+
+    Returns:
+        A new Tensor with powered elements.
+    """
+    from tensorforge.autograd.engine import is_grad_enabled
+    from tensorforge.autograd.function import PowBackward
+    from tensorforge.tensor.tensor import Tensor
+
+    out_dtype = a.dtype if isinstance(exponent, int) else float32
+    res_arr = np.power(a.numpy(), exponent)
+    result_tensor = Tensor(res_arr, dtype=out_dtype)
+
+    if is_grad_enabled() and a.requires_grad:
+        result_tensor.grad_fn = PowBackward(a, exponent)
+        result_tensor.requires_grad = True
+
+    return result_tensor
+
+
+def cross_entropy(
+    logits: Tensor,
+    targets: Union[Tensor, Sequence[int], np.ndarray],
+    reduction: str = "mean",
+) -> Tensor:
+    """Compute cross-entropy loss between unnormalized logits and class index targets.
+
+    Args:
+        logits: Unnormalized class scores of shape (N, C) or (C,).
+        targets: Ground truth class integer indices of shape (N,) or scalar.
+        reduction: 'mean', 'sum', or 'none'.
+
+    Returns:
+        Scalar loss Tensor (if reduction is 'mean' or 'sum') or 1D Tensor (if 'none').
+    """
+    from tensorforge.autograd.engine import is_grad_enabled
+    from tensorforge.autograd.function import CrossEntropyBackward
+    from tensorforge.tensor.tensor import Tensor
+
+    if reduction not in ("mean", "sum", "none"):
+        raise ValueError(f"Invalid reduction '{reduction}'; must be 'mean', 'sum', or 'none'")
+
+    logits_np = logits.numpy()
+    is_1d = (logits_np.ndim == 1)
+    if is_1d:
+        logits_np = logits_np.reshape(1, -1)
+
+    if isinstance(targets, Tensor):
+        targets_np = targets.numpy().astype(np.int64)
+    elif isinstance(targets, np.ndarray):
+        targets_np = targets.astype(np.int64)
+    else:
+        targets_np = np.array(targets, dtype=np.int64)
+
+    if targets_np.ndim == 0:
+        targets_np = targets_np.reshape(1)
+
+    N, C = logits_np.shape
+    if targets_np.shape[0] != N:
+        raise DimensionError(
+            f"CrossEntropy target batch size ({targets_np.shape[0]}) does not match logits batch size ({N})"
+        )
+
+    if np.any(targets_np < 0) or np.any(targets_np >= C):
+        raise IndexError_(
+            f"Target class index out of bounds: expected in range [0, {C - 1}], got {targets_np}"
+        )
+
+    # Stable log-softmax computation
+    max_logits = np.max(logits_np, axis=-1, keepdims=True)
+    shifted = logits_np - max_logits
+    exp_shifted = np.exp(shifted)
+    sum_exp = np.sum(exp_shifted, axis=-1, keepdims=True)
+    log_probs = shifted - np.log(sum_exp)
+    probs = exp_shifted / sum_exp
+
+    # NLL loss for target indices
+    sample_losses = -log_probs[np.arange(N), targets_np]
+
+    out_dtype = logits.dtype if logits.dtype.is_floating_point else float32
+
+    if reduction == "mean":
+        loss_val = np.mean(sample_losses)
+        res_tensor = Tensor(loss_val, dtype=out_dtype)
+    elif reduction == "sum":
+        loss_val = np.sum(sample_losses)
+        res_tensor = Tensor(loss_val, dtype=out_dtype)
+    else:  # none
+        if is_1d:
+            sample_losses = sample_losses.reshape(())
+        res_tensor = Tensor(sample_losses, dtype=out_dtype)
+
+    if is_grad_enabled() and logits.requires_grad:
+        res_tensor.grad_fn = CrossEntropyBackward(
+            logits, probs, targets_np, reduction=reduction, is_1d=is_1d
+        )
+        res_tensor.requires_grad = True
+
+    return res_tensor
+

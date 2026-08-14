@@ -4,72 +4,93 @@
 
 ---
 
-## Current Milestone: `v0.2 – Automatic Differentiation`
+## Current Milestone: `v0.3 – Neural Network Modules`
 
-> **Development Status:** `v0.2 (Active Milestone)`
-> TensorForge v0.2 introduces a custom reverse-mode automatic differentiation engine with dynamic computational graph (DAG) construction, iterative topological backpropagation, and broadcast gradient reduction.
+> **Development Status:** `v0.3 (Active Milestone)`
+> TensorForge v0.3 introduces an object-oriented neural network architecture (`tensorforge.nn`) with `Module` base class, `Parameter` abstraction, dense `Linear` layers, activation modules (`ReLU`, `Sigmoid`, `Tanh`, `Softmax`), loss functions (`MSELoss`, `CrossEntropyLoss`), and the `Sequential` container, fully integrated with TensorForge's custom reverse-mode automatic differentiation engine.
 
 ---
 
 ## Project Overview
 
-TensorForge provides explicit control over memory representation, tensor operations, and automatic differentiation without relying on external deep learning framework runtimes (such as PyTorch, TensorFlow, or JAX).
+TensorForge provides explicit control over memory representation, tensor operations, automatic differentiation, and neural network construction without relying on external deep learning runtimes (such as PyTorch, TensorFlow, or JAX).
 
-In **v0.2**, TensorForge features:
+In **v0.3**, TensorForge features:
 - Core multi-dimensional `Tensor` abstraction with contiguous physical storage.
 - Custom reverse-mode automatic differentiation engine (`autograd`).
-- Dynamic computational graph construction during forward operations.
-- Iterative topological sort backpropagation (`tensor.backward()`).
-- Analytical gradient formulas with automatic broadcast dimension reduction.
-- Gradient accumulation across branching graph paths (`y = x * x + x`).
+- Dynamic computational graph construction with iterative topological backpropagation.
+- Object-oriented neural network layer (`tensorforge.nn`):
+  - `Parameter`: trainable tensor representation with automatic gradient tracking.
+  - `Module`: base class with recursive parameter discovery, submodule registration, `train()` / `eval()` state, and `zero_grad()`.
+  - `Linear`: dense fully-connected layer ($y = xW^T + b$) with uniform parameter initialization.
+  - Activation modules: `ReLU`, `Sigmoid`, `Tanh`, and `Softmax`.
+  - Loss functions: `MSELoss` and numerically stable `CrossEntropyLoss`.
+  - `Sequential`: in-order composable module container.
 
 ---
 
-## Autograd & Computation Graph Architecture
+## Framework Architecture
 
 ```
-Forward Pass (Graph Construction):
-  x (requires_grad=True) ──┐
-                           ├──> Mul (MulBackward) ──> h ──> Sum (SumBackward) ──> loss
-  w (requires_grad=True) ──┘
-
-Backward Pass (Iterative Topological Traversal):
-  grad(loss) = 1.0
-      │
-      ▼
-  SumBackward
-      │
-      ▼ grad(h)
-  MulBackward
-      │
-      ├───────────────────────┐
-      ▼                       ▼
-  grad(x) [accumulated]   grad(w) [accumulated]
+                       ┌─────────────────────────┐
+                       │     Tensor (Metadata)   │
+                       │  - shape, strides, dtype│
+                       └────────────┬────────────┘
+                                    │ owns
+                       ┌────────────▼────────────┐
+                       │ Storage (Contiguous Buf)│
+                       │  - NumPyStorage         │
+                       └────────────┬────────────┘
+                                    │
+                       ┌────────────▼────────────┐
+                       │     Autograd Engine     │
+                       │  - DAG / Topological DFS│
+                       │  - Gradient accumulation│
+                       └────────────┬────────────┘
+                                    │
+                       ┌────────────▼────────────┐
+                       │      Module Base        │
+                       │  - parameters()         │
+                       │  - named_parameters()   │
+                       │  - zero_grad(), train() │
+                       └──────┬───────────┬──────┘
+                              │           │
+           ┌──────────────────┴───┐   ┌───┴──────────────────┐
+           │                      │   │                      │
+   ┌───────▼────────┐     ┌───────▼───▼────┐         ┌───────▼────────┐
+   │   Parameter    │     │  Linear Layer  │         │   Sequential   │
+   │  - requires_grad│    │  - weight, bias│         │  - child mods  │
+   └────────────────┘     └────────────────┘         └────────────────┘
+                                  │
+                          ┌───────▼────────┐
+                          │  Activations   │
+                          │ - ReLU, Sigmoid│
+                          │ - Tanh, Softmax│
+                          └───────┬────────┘
+                                  │
+                          ┌───────▼────────┐
+                          │ Loss Functions │
+                          │ - MSELoss      │
+                          │ - CrossEntropy │
+                          └────────────────┘
 ```
-
-### Key Autograd Capabilities:
-- **Leaf & Non-Leaf Tensors:** User-created inputs are marked as `is_leaf=True`. Intermediate operation results are non-leaf tensors carrying a `grad_fn` pointer to their backward graph node.
-- **Topological Backpropagation:** Backpropagation traverses the DAG in reverse topological order using an iterative DFS, avoiding Python recursion limits.
-- **Gradient Accumulation:** Repeated tensor uses correctly sum incoming gradient contributions without overwriting existing gradients.
-- **Broadcast Gradient Reduction:** Gradients flowing back across broadcasted dimensions are automatically reduced to match original operand shapes via `reduce_gradient_to_shape`.
-- **Gradient Utilities:** `.zero_grad()` to reset gradients, `.detach()` to disconnect tensors from the computation graph, and `no_grad()` context manager.
 
 ---
 
-## Supported Differentiable Operations (v0.2)
+## Supported Neural Network Components (v0.3)
 
-| Operation | Forward Syntax | Backward Gradient Rule |
+| Component | Description | Forward Mathematical Formulation |
 |---|---|---|
-| **Addition** | `a + b` | $\frac{\partial z}{\partial a} = 1, \quad \frac{\partial z}{\partial b} = 1$ |
-| **Subtraction** | `a - b` | $\frac{\partial z}{\partial a} = 1, \quad \frac{\partial z}{\partial b} = -1$ |
-| **Multiplication** | `a * b` | $\frac{\partial z}{\partial a} = b, \quad \frac{\partial z}{\partial b} = a$ |
-| **Division** | `a / b` | $\frac{\partial z}{\partial a} = \frac{1}{b}, \quad \frac{\partial z}{\partial b} = -\frac{a}{b^2}$ |
-| **Negation** | `-a` | $\frac{\partial z}{\partial a} = -1$ |
-| **Matrix Multiplication** | `a @ b` | $\frac{\partial C}{\partial A} = \text{grad} \cdot B^T, \quad \frac{\partial C}{\partial B} = A^T \cdot \text{grad}$ |
-| **Sum Reduction** | `a.sum(axis, keepdims)` | Broadcasts upstream gradient across reduced axes |
-| **Mean Reduction** | `a.mean(axis, keepdims)` | Scales upstream gradient by $\frac{1}{N}$ and broadcasts |
-| **Reshape** | `a.reshape(*shape)` | Reshapes upstream gradient back to input shape |
-| **Transpose** | `a.transpose(*axes)` | Applies inverse axis permutation to upstream gradient |
+| **`Parameter`** | Trainable model parameter | Wraps `Tensor` with `requires_grad=True` |
+| **`Module`** | Base layer / model abstraction | Manages parameters, submodules, and state |
+| **`Linear`** | Dense fully-connected layer | $y = x W^T + b$ |
+| **`ReLU`** | Rectified linear unit activation | $y = \max(0, x)$ |
+| **`Sigmoid`** | Logistic sigmoid activation | $y = \frac{1}{1 + \exp(-x)}$ |
+| **`Tanh`** | Hyperbolic tangent activation | $y = \tanh(x)$ |
+| **`Softmax`** | Normalized probability distribution | $S_i = \frac{\exp(x_i - \max(x))}{\sum_j \exp(x_j - \max(x))}$ |
+| **`MSELoss`** | Mean squared error loss | $L = \text{mean}((y_{\text{pred}} - y_{\text{true}})^2)$ |
+| **`CrossEntropyLoss`** | Multi-class cross-entropy loss | $L = -\frac{1}{N} \sum_{i=1}^N \log P(y_i)$ (stable log-sum-exp) |
+| **`Sequential`** | Sequential module pipeline | $y = f_n(\dots f_2(f_1(x)))$ |
 
 ---
 
@@ -96,35 +117,50 @@ pip install -e ".[dev]"
 
 ## Basic Usage
 
-### Autograd Example
+### Building and Training a Neural Network
 ```python
 import tensorforge as tf
+from tensorforge.nn import CrossEntropyLoss, Linear, ReLU, Sequential
 
-# 1. Create leaf tensors requiring gradients
-x = tf.tensor([[1.0, 2.0], [3.0, 4.0]], dtype=tf.float32, requires_grad=False)
-w = tf.tensor([[0.5, -1.0], [2.0, 1.5]], dtype=tf.float32, requires_grad=True)
-b = tf.tensor([0.1, 0.2], dtype=tf.float32, requires_grad=True)
+# 1. Define network architecture
+model = Sequential(
+    Linear(in_features=4, out_features=8),
+    ReLU(),
+    Linear(in_features=8, out_features=3),
+)
 
-# 2. Forward pass: Build dynamic computation graph
-h = x @ w + b
-loss = (h * h).mean()
+# 2. Input data and ground truth targets
+x = tf.tensor([
+    [0.1, 0.2, 0.3, 0.4],
+    [1.0, 0.5, -0.2, 0.8],
+    [-0.5, 1.2, 0.0, -0.3],
+], dtype=tf.float32)
+targets = [0, 2, 1]
 
-# 3. Backward pass: Reverse-mode automatic differentiation
+# 3. Forward pass
+logits = model(x)
+
+# 4. Compute loss
+criterion = CrossEntropyLoss()
+loss = criterion(logits, targets)
+print(f"Loss: {loss.item():.4f}")
+
+# 5. Backpropagation
 loss.backward()
 
-# 4. Inspect analytical gradients
-print(f"dL/dW (w.grad):\n{w.grad}")
-print(f"dL/dB (b.grad):\n{b.grad}")
+# 6. Inspect gradients on parameters
+for name, param in model.named_parameters():
+    print(f"{name} grad shape: {param.grad.shape}")
 
-# 5. Clear gradients
-w.zero_grad()
-b.zero_grad()
+# 7. Reset gradients
+model.zero_grad()
 ```
 
 Run the included demonstration scripts:
 ```bash
 python examples/basic_tensor.py
 python examples/autograd_demo.py
+python examples/neural_network_demo.py
 ```
 
 ---
@@ -134,38 +170,58 @@ python examples/autograd_demo.py
 ```
 TensorForge/
 ├── tensorforge/
-│   ├── __init__.py                  # Package exports & version
-│   ├── autograd/
-│   │   ├── __init__.py              # Autograd package interface
-│   │   ├── engine.py                # Topological sort & backward propagation engine
-│   │   └── function.py              # Backward graph Node definitions & unbroadcasting
+│   ├── __init__.py                  # Top-level exports & version
 │   │
-│   ├── tensor/
-│   │   ├── __init__.py              # Tensor module interface
-│   │   ├── tensor.py                # Core Tensor abstraction with autograd state
-│   │   ├── dtype.py                 # DType registry & type promotion rules
-│   │   ├── shape.py                 # Shape, stride computation & broadcasting geometry
+│   ├── nn/                          # Neural Network subsystem
+│   │   ├── __init__.py              # NN module exports
+│   │   ├── parameter.py             # Parameter class
+│   │   ├── module.py                # Base Module class
+│   │   ├── linear.py                # Dense Linear layer
+│   │   ├── activations.py           # ReLU, Sigmoid, Tanh, Softmax
+│   │   ├── losses.py                # MSELoss, CrossEntropyLoss
+│   │   ├── sequential.py            # Sequential container
+│   │   └── init.py                  # Parameter initialization utilities
+│   │
+│   ├── autograd/                    # Automatic Differentiation engine
+│   │   ├── __init__.py              # Autograd exports
+│   │   ├── engine.py                # Topological sort & backward engine
+│   │   └── function.py              # Backward Node graph definitions
+│   │
+│   ├── tensor/                      # Core Tensor subsystem
+│   │   ├── __init__.py              # Tensor exports
+│   │   ├── tensor.py                # Core Tensor abstraction
+│   │   ├── dtype.py                 # DType registry & type promotions
+│   │   ├── shape.py                 # Shape, strides, broadcasting
 │   │   ├── storage.py               # Storage abstraction & NumPyStorage
-│   │   └── operations.py           # Forward ops with autograd graph hooks
+│   │   └── operations.py           # Differentiable tensor operations
 │   │
 │   └── utils/
 │       ├── __init__.py              # Utility exports
-│       └── validation.py            # Custom exception hierarchy & shape validators
+│       └── validation.py            # Error hierarchy & validators
 │
 ├── tests/
-│   ├── autograd/
-│   │   ├── test_utils.py            # Finite-difference numerical gradient checker
-│   │   ├── test_basic_autograd.py   # Core ops, accumulation, detach, no_grad
-│   │   ├── test_broadcast_gradients.py # Broadcast gradient reduction tests
-│   │   ├── test_matmul_gradients.py # 1D, 2D, and batched matmul gradient tests
-│   │   └── test_reduction_gradients.py # Sum, mean, reshape, transpose gradient tests
+│   ├── nn/                          # NN unit tests
+│   │   ├── test_parameter.py
+│   │   ├── test_module.py
+│   │   ├── test_linear.py
+│   │   ├── test_activations.py
+│   │   ├── test_losses.py
+│   │   └── test_sequential.py
+│   │
+│   ├── autograd/                    # Autograd unit tests
+│   │   ├── test_utils.py            # Finite-difference gradient checker
+│   │   ├── test_basic_autograd.py
+│   │   ├── test_broadcast_gradients.py
+│   │   ├── test_matmul_gradients.py
+│   │   └── test_reduction_gradients.py
 │   │
 │   └── tensor/
 │       └── test_tensor.py           # Tensor core unit tests
 │
 ├── examples/
-│   ├── basic_tensor.py              # Tensor core demonstration
-│   └── autograd_demo.py             # Automatic differentiation demonstration
+│   ├── basic_tensor.py              # Tensor core demo
+│   ├── autograd_demo.py             # Autograd demo
+│   └── neural_network_demo.py       # Neural network demo
 │
 ├── README.md
 ├── pyproject.toml
@@ -179,8 +235,8 @@ TensorForge/
 | Milestone | Status | Description |
 |---|---|---|
 | **v0.1 – Project Foundation & Tensor Core** | **Complete** | Tensor abstraction, metadata/storage decoupling, basic ops, broadcasting, dtype handling |
-| **v0.2 – Automatic Differentiation** | **Current** | Reverse-mode autodiff DAG engine, topological backpropagation, broadcast reductions |
-| **v0.3 – Neural Network Modules & Layers** | Planned | Parameter abstraction, Modules/Containers, Linear, Conv2D, Activations, Loss functions |
+| **v0.2 – Automatic Differentiation** | **Complete** | Reverse-mode autodiff DAG engine, topological backpropagation, broadcast reductions |
+| **v0.3 – Neural Network Modules & Layers** | **Current** | Parameter, Module, Linear, Activations (ReLU, Sigmoid, Tanh, Softmax), Losses, Sequential |
 | **v0.4 – Optimizers & Training Pipeline** | Planned | SGD, Adam, AdamW, learning rate schedulers, dataloaders, training loops |
 | **v0.5 – Model Serialization & Checkpointing** | Planned | Memory-mapped weight serialization, state_dict format, format converters |
 | **v0.6 – C++ Inference Runtime & Custom Allocators** | Planned | Native C++ tensor engine, arena allocator, SIMD/AVX kernels, zero-copy Pybind11 integration |

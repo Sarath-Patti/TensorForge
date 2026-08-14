@@ -408,6 +408,45 @@ class Tensor:
         from tensorforge.tensor.operations import matmul
         return matmul(other, self)
 
+    def __pow__(self, exponent: Union[float, int]) -> Tensor:
+        from tensorforge.tensor.operations import pow as _pow
+        return _pow(self, exponent)
+
+    def exp(self) -> Tensor:
+        """Compute element-wise exponential."""
+        from tensorforge.tensor.operations import exp as _exp
+        return _exp(self)
+
+    def log(self) -> Tensor:
+        """Compute element-wise natural logarithm."""
+        from tensorforge.tensor.operations import log as _log
+        return _log(self)
+
+    def relu(self) -> Tensor:
+        """Apply rectified linear unit activation."""
+        from tensorforge.tensor.operations import relu as _relu
+        return _relu(self)
+
+    def sigmoid(self) -> Tensor:
+        """Apply logistic sigmoid activation."""
+        from tensorforge.tensor.operations import sigmoid as _sigmoid
+        return _sigmoid(self)
+
+    def tanh(self) -> Tensor:
+        """Apply hyperbolic tangent activation."""
+        from tensorforge.tensor.operations import tanh as _tanh
+        return _tanh(self)
+
+    def softmax(self, dim: int = -1) -> Tensor:
+        """Apply softmax activation along specified dimension."""
+        from tensorforge.tensor.operations import softmax as _softmax
+        return _softmax(self, dim=dim)
+
+    def pow(self, exponent: Union[float, int]) -> Tensor:
+        """Compute element-wise power."""
+        from tensorforge.tensor.operations import pow as _pow
+        return _pow(self, exponent)
+
     def __neg__(self) -> Tensor:
         from tensorforge.tensor.operations import neg
         return neg(self)
