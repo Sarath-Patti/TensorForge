@@ -1,5 +1,6 @@
 """TensorForge: A Memory-Aware Deep Learning Framework and Inference Engine."""
 
+from tensorforge.autograd.engine import backward, is_grad_enabled, no_grad
 from tensorforge.tensor.dtype import (
     DType,
     bool_,
@@ -49,7 +50,7 @@ from tensorforge.utils.validation import (
     TensorForgeError,
 )
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "__version__",
@@ -61,6 +62,10 @@ __all__ = [
     "randn",
     "arange",
     "from_numpy",
+    # Autograd
+    "backward",
+    "no_grad",
+    "is_grad_enabled",
     # DTypes
     "DType",
     "float32",

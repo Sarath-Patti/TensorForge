@@ -1,7 +1,8 @@
 """Core mathematical and structural operations for TensorForge tensors.
 
 Implements element-wise arithmetic with broadcasting, matrix multiplication,
-reductions (sum, mean), and structural transformations (reshape, transpose).
+reductions (sum, mean), and structural transformations (reshape, transpose),
+with integrated reverse-mode automatic differentiation graph construction.
 """
 
 from __future__ import annotations
@@ -43,6 +44,8 @@ def add(a: Union[Tensor, float, int], b: Union[Tensor, float, int]) -> Tensor:
     Returns:
         A new Tensor containing the element-wise sum.
     """
+    from tensorforge.autograd.engine import is_grad_enabled
+    from tensorforge.autograd.function import AddBackward
     from tensorforge.tensor.tensor import Tensor
 
     t_a = _ensure_tensor(a)
@@ -56,7 +59,13 @@ def add(a: Union[Tensor, float, int], b: Union[Tensor, float, int]) -> Tensor:
         t_a.numpy().astype(out_dtype.numpy_dtype, copy=False),
         t_b.numpy().astype(out_dtype.numpy_dtype, copy=False),
     )
-    return Tensor(result_arr, dtype=out_dtype)
+    result_tensor = Tensor(result_arr, dtype=out_dtype)
+
+    if is_grad_enabled() and (t_a.requires_grad or t_b.requires_grad):
+        result_tensor.grad_fn = AddBackward(t_a, t_b)
+        result_tensor.requires_grad = True
+
+    return result_tensor
 
 
 def sub(a: Union[Tensor, float, int], b: Union[Tensor, float, int]) -> Tensor:
@@ -69,6 +78,8 @@ def sub(a: Union[Tensor, float, int], b: Union[Tensor, float, int]) -> Tensor:
     Returns:
         A new Tensor containing the element-wise difference (a - b).
     """
+    from tensorforge.autograd.engine import is_grad_enabled
+    from tensorforge.autograd.function import SubBackward
     from tensorforge.tensor.tensor import Tensor
 
     t_a = _ensure_tensor(a)
@@ -81,7 +92,13 @@ def sub(a: Union[Tensor, float, int], b: Union[Tensor, float, int]) -> Tensor:
         t_a.numpy().astype(out_dtype.numpy_dtype, copy=False),
         t_b.numpy().astype(out_dtype.numpy_dtype, copy=False),
     )
-    return Tensor(result_arr, dtype=out_dtype)
+    result_tensor = Tensor(result_arr, dtype=out_dtype)
+
+    if is_grad_enabled() and (t_a.requires_grad or t_b.requires_grad):
+        result_tensor.grad_fn = SubBackward(t_a, t_b)
+        result_tensor.requires_grad = True
+
+    return result_tensor
 
 
 def mul(a: Union[Tensor, float, int], b: Union[Tensor, float, int]) -> Tensor:
@@ -94,6 +111,8 @@ def mul(a: Union[Tensor, float, int], b: Union[Tensor, float, int]) -> Tensor:
     Returns:
         A new Tensor containing the element-wise product.
     """
+    from tensorforge.autograd.engine import is_grad_enabled
+    from tensorforge.autograd.function import MulBackward
     from tensorforge.tensor.tensor import Tensor
 
     t_a = _ensure_tensor(a)
@@ -106,7 +125,13 @@ def mul(a: Union[Tensor, float, int], b: Union[Tensor, float, int]) -> Tensor:
         t_a.numpy().astype(out_dtype.numpy_dtype, copy=False),
         t_b.numpy().astype(out_dtype.numpy_dtype, copy=False),
     )
-    return Tensor(result_arr, dtype=out_dtype)
+    result_tensor = Tensor(result_arr, dtype=out_dtype)
+
+    if is_grad_enabled() and (t_a.requires_grad or t_b.requires_grad):
+        result_tensor.grad_fn = MulBackward(t_a, t_b)
+        result_tensor.requires_grad = True
+
+    return result_tensor
 
 
 def truediv(a: Union[Tensor, float, int], b: Union[Tensor, float, int]) -> Tensor:
@@ -119,6 +144,8 @@ def truediv(a: Union[Tensor, float, int], b: Union[Tensor, float, int]) -> Tenso
     Returns:
         A new Tensor containing the quotient (a / b). Floating-point result.
     """
+    from tensorforge.autograd.engine import is_grad_enabled
+    from tensorforge.autograd.function import DivBackward
     from tensorforge.tensor.tensor import Tensor
 
     t_a = _ensure_tensor(a)
@@ -133,7 +160,13 @@ def truediv(a: Union[Tensor, float, int], b: Union[Tensor, float, int]) -> Tenso
         t_a.numpy().astype(out_dtype.numpy_dtype, copy=False),
         t_b.numpy().astype(out_dtype.numpy_dtype, copy=False),
     )
-    return Tensor(result_arr, dtype=out_dtype)
+    result_tensor = Tensor(result_arr, dtype=out_dtype)
+
+    if is_grad_enabled() and (t_a.requires_grad or t_b.requires_grad):
+        result_tensor.grad_fn = DivBackward(t_a, t_b)
+        result_tensor.requires_grad = True
+
+    return result_tensor
 
 
 def neg(a: Tensor) -> Tensor:
@@ -145,10 +178,18 @@ def neg(a: Tensor) -> Tensor:
     Returns:
         A new Tensor with negated values.
     """
+    from tensorforge.autograd.engine import is_grad_enabled
+    from tensorforge.autograd.function import NegBackward
     from tensorforge.tensor.tensor import Tensor
 
     result_arr = np.negative(a.numpy())
-    return Tensor(result_arr, dtype=a.dtype)
+    result_tensor = Tensor(result_arr, dtype=a.dtype)
+
+    if is_grad_enabled() and a.requires_grad:
+        result_tensor.grad_fn = NegBackward(a)
+        result_tensor.requires_grad = True
+
+    return result_tensor
 
 
 def matmul(a: Tensor, b: Tensor) -> Tensor:
@@ -171,6 +212,8 @@ def matmul(a: Tensor, b: Tensor) -> Tensor:
     Raises:
         DimensionError: If matrix shapes are incompatible.
     """
+    from tensorforge.autograd.engine import is_grad_enabled
+    from tensorforge.autograd.function import MatmulBackward
     from tensorforge.tensor.tensor import Tensor
 
     # Validate shapes and compute expected output shape
@@ -187,15 +230,18 @@ def matmul(a: Tensor, b: Tensor) -> Tensor:
     if result_tensor.shape != expected_shape:
         result_tensor = result_tensor.reshape(expected_shape)
 
+    if is_grad_enabled() and (a.requires_grad or b.requires_grad):
+        result_tensor.grad_fn = MatmulBackward(a, b)
+        result_tensor.requires_grad = True
+
     return result_tensor
 
 
 def reshape(a: Tensor, *shape: Union[int, Sequence[int]]) -> Tensor:
     """Return a tensor with the same data reshaped to target dimensions.
 
-    Note (v0.1):
-        In v0.1, TensorForge enforces a contiguous storage model. Reshaping
-        materializes a new contiguous Tensor.
+    Note (v0.1+):
+        In TensorForge, reshaping materializes a contiguous Tensor.
 
     Args:
         a: Input tensor.
@@ -207,6 +253,8 @@ def reshape(a: Tensor, *shape: Union[int, Sequence[int]]) -> Tensor:
     Raises:
         ShapeError: If the target shape is incompatible with the number of elements.
     """
+    from tensorforge.autograd.engine import is_grad_enabled
+    from tensorforge.autograd.function import ReshapeBackward
     from tensorforge.tensor.tensor import Tensor
 
     if len(shape) == 1 and isinstance(shape[0], (tuple, list)):
@@ -216,16 +264,17 @@ def reshape(a: Tensor, *shape: Union[int, Sequence[int]]) -> Tensor:
 
     resolved_shape = validate_reshape_shape(a.numel, target_shape)
     reshaped_arr = np.ascontiguousarray(a.numpy().reshape(resolved_shape))
-    return Tensor(reshaped_arr, dtype=a.dtype)
+    result_tensor = Tensor(reshaped_arr, dtype=a.dtype)
+
+    if is_grad_enabled() and a.requires_grad:
+        result_tensor.grad_fn = ReshapeBackward(a)
+        result_tensor.requires_grad = True
+
+    return result_tensor
 
 
 def transpose(a: Tensor, *axes: Union[int, Sequence[int]]) -> Tensor:
     """Permute the dimensions of a tensor, returning a new contiguous Tensor.
-
-    Note (v0.1):
-        In v0.1, TensorForge operates exclusively on contiguous memory.
-        This operation materializes a new contiguous Tensor rather than
-        creating a non-contiguous view.
 
     Args:
         a: Input tensor.
@@ -237,6 +286,8 @@ def transpose(a: Tensor, *axes: Union[int, Sequence[int]]) -> Tensor:
     Raises:
         DimensionError: If axes do not form a valid permutation of dimensions.
     """
+    from tensorforge.autograd.engine import is_grad_enabled
+    from tensorforge.autograd.function import TransposeBackward
     from tensorforge.tensor.tensor import Tensor
 
     if len(axes) == 0:
@@ -248,7 +299,13 @@ def transpose(a: Tensor, *axes: Union[int, Sequence[int]]) -> Tensor:
 
     validated_axes = validate_transpose_axes(a.ndim, norm_axes)
     transposed_arr = np.ascontiguousarray(np.transpose(a.numpy(), axes=validated_axes))
-    return Tensor(transposed_arr, dtype=a.dtype)
+    result_tensor = Tensor(transposed_arr, dtype=a.dtype)
+
+    if is_grad_enabled() and a.requires_grad:
+        result_tensor.grad_fn = TransposeBackward(a, validated_axes)
+        result_tensor.requires_grad = True
+
+    return result_tensor
 
 
 def sum(
@@ -269,6 +326,8 @@ def sum(
     Raises:
         DimensionError: If axis is out of valid bounds.
     """
+    from tensorforge.autograd.engine import is_grad_enabled
+    from tensorforge.autograd.function import SumBackward
     from tensorforge.tensor.tensor import Tensor
 
     if axis is not None:
@@ -280,7 +339,13 @@ def sum(
         validated_axis = None
 
     res_arr = np.sum(a.numpy(), axis=validated_axis, keepdims=keepdims)
-    return Tensor(res_arr, dtype=a.dtype)
+    result_tensor = Tensor(res_arr, dtype=a.dtype)
+
+    if is_grad_enabled() and a.requires_grad:
+        result_tensor.grad_fn = SumBackward(a, axis=validated_axis, keepdims=keepdims)
+        result_tensor.requires_grad = True
+
+    return result_tensor
 
 
 def mean(
@@ -301,6 +366,8 @@ def mean(
     Raises:
         DimensionError: If axis is out of valid bounds.
     """
+    from tensorforge.autograd.engine import is_grad_enabled
+    from tensorforge.autograd.function import MeanBackward
     from tensorforge.tensor.tensor import Tensor
 
     if a.numel == 0:
@@ -316,4 +383,10 @@ def mean(
 
     out_dtype = a.dtype if a.dtype.is_floating_point else float32
     res_arr = np.mean(a.numpy(), axis=validated_axis, keepdims=keepdims, dtype=out_dtype.numpy_dtype)
-    return Tensor(res_arr, dtype=out_dtype)
+    result_tensor = Tensor(res_arr, dtype=out_dtype)
+
+    if is_grad_enabled() and a.requires_grad:
+        result_tensor.grad_fn = MeanBackward(a, axis=validated_axis, keepdims=keepdims)
+        result_tensor.requires_grad = True
+
+    return result_tensor
