@@ -33,6 +33,10 @@ class StorageError(TensorForgeError, RuntimeError):
     """Raised when memory allocation or low-level storage operations fail."""
 
 
+class QuantizationError(TensorForgeError, ValueError):
+    """Raised when a quantization, dequantization, or calibration operation is invalid."""
+
+
 def validate_shape(shape: Any) -> Tuple[int, ...]:
     """Validate and normalize a shape specification.
 

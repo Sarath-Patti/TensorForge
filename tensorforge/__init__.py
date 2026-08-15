@@ -1,12 +1,20 @@
 """TensorForge: A Memory-Aware Deep Learning Framework and Inference Engine."""
 
-from tensorforge import autograd, backend, data, native, nn, optim, training
+from tensorforge import autograd, backend, data, native, nn, optim, quantization, training
 from tensorforge.autograd.engine import backward, is_grad_enabled, no_grad
 from tensorforge.backend.dispatcher import (
     backend_context,
     get_backend,
     get_last_backend,
     set_backend,
+)
+from tensorforge.quantization import (
+    QuantizedTensor,
+    dequantize,
+    dequantize_tensor,
+    qmatmul,
+    quantize,
+    quantize_tensor,
 )
 from tensorforge.tensor.dtype import (
     DType,
@@ -62,12 +70,13 @@ from tensorforge.utils.validation import (
     DimensionError,
     DTypeError,
     IndexError_,
+    QuantizationError,
     ShapeError,
     StorageError,
     TensorForgeError,
 )
 
-__version__ = "0.6.0"
+__version__ = "0.7.0"
 
 __all__ = [
     "__version__",
@@ -79,6 +88,7 @@ __all__ = [
     "training",
     "native",
     "backend",
+    "quantization",
     # Core
     "Tensor",
     "tensor",
@@ -87,6 +97,13 @@ __all__ = [
     "randn",
     "arange",
     "from_numpy",
+    # Quantization
+    "QuantizedTensor",
+    "quantize",
+    "dequantize",
+    "quantize_tensor",
+    "dequantize_tensor",
+    "qmatmul",
     # Backend Control
     "set_backend",
     "get_backend",
@@ -143,4 +160,5 @@ __all__ = [
     "DTypeError",
     "IndexError_",
     "StorageError",
+    "QuantizationError",
 ]

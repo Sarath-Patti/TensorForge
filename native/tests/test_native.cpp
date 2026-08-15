@@ -119,6 +119,64 @@ void test_matmul() {
     std::cout << "  -> Matmul Kernel PASSED" << std::endl;
 }
 
+void test_quantization_kernels() {
+    std::cout << "[Test] Quantization & INT8 Matmul Kernels..." << std::endl;
+    // Test quantize and dequantize
+    Tensor fp32_in = Tensor::empty(Shape({4}), DType::Float32);
+    Tensor int8_q = Tensor::empty(Shape({4}), DType::Int8);
+    Tensor fp32_out = Tensor::empty(Shape({4}), DType::Float32);
+
+    float* fp_in_ptr = fp32_in.data_ptr<float>();
+    fp_in_ptr[0] = -1.0f;
+    fp_in_ptr[1] = 0.0f;
+    fp_in_ptr[2] = 0.5f;
+    fp_in_ptr[3] = 1.0f;
+
+    float scale = 1.0f / 127.0f;
+    int32_t zero_point = 0;
+
+    kernels::quantize_float32(fp32_in, int8_q, scale, zero_point);
+    int8_t* q_ptr = int8_q.data_ptr<int8_t>();
+    assert(q_ptr[0] == -127);
+    assert(q_ptr[1] == 0);
+    assert(q_ptr[2] == 64);
+    assert(q_ptr[3] == 127);
+    (void)q_ptr;
+
+    kernels::dequantize_int8(int8_q, fp32_out, scale, zero_point);
+    float* fp_out_ptr = fp32_out.data_ptr<float>();
+    assert(std::fabs(fp_out_ptr[0] - (-1.0f)) < 1e-2f);
+    assert(std::fabs(fp_out_ptr[1] - 0.0f) < 1e-2f);
+    assert(std::fabs(fp_out_ptr[2] - 0.5f) < 1e-2f);
+    assert(std::fabs(fp_out_ptr[3] - 1.0f) < 1e-2f);
+    (void)fp_out_ptr;
+
+    // Test INT8 qmatmul
+    Tensor a_q = Tensor::empty(Shape({2, 2}), DType::Int8);
+    Tensor b_q = Tensor::empty(Shape({2, 2}), DType::Int8);
+    Tensor c_fp = Tensor::empty(Shape({2, 2}), DType::Float32);
+
+    int8_t* a_q_ptr = a_q.data_ptr<int8_t>();
+    int8_t* b_q_ptr = b_q.data_ptr<int8_t>();
+    a_q_ptr[0] = 10; a_q_ptr[1] = 20;
+    a_q_ptr[2] = 30; a_q_ptr[3] = 40;
+    b_q_ptr[0] = 1;  b_q_ptr[1] = 2;
+    b_q_ptr[2] = 3;  b_q_ptr[3] = 4;
+
+    float s_a = 0.1f;
+    float s_b = 0.2f;
+    kernels::qmatmul_int8(a_q, b_q, c_fp, s_a, 0, s_b, 0);
+
+    float* c_fp_ptr = c_fp.data_ptr<float>();
+    assert(std::fabs(c_fp_ptr[0] - 1.4f) < 1e-5f);
+    assert(std::fabs(c_fp_ptr[1] - 2.0f) < 1e-5f);
+    assert(std::fabs(c_fp_ptr[2] - 3.0f) < 1e-5f);
+    assert(std::fabs(c_fp_ptr[3] - 4.4f) < 1e-5f);
+    (void)c_fp_ptr;
+
+    std::cout << "  -> Quantization Kernels PASSED" << std::endl;
+}
+
 int main() {
     std::cout << "==========================================" << std::endl;
     std::cout << "Running TensorForge Native C++ Test Suite" << std::endl;
@@ -128,6 +186,7 @@ int main() {
     test_allocator_and_storage();
     test_tensor_and_kernels();
     test_matmul();
+    test_quantization_kernels();
 
     std::cout << "All Native C++ tests passed successfully!" << std::endl;
     return 0;

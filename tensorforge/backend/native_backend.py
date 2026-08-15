@@ -49,6 +49,22 @@ def can_native_matmul(a_dtype: object, a_ndim: int, a_shape: Tuple[int, ...], b_
     return a_shape[1] == b_shape[0]
 
 
+def can_native_qmatmul(a_ndim: int, a_shape: Tuple[int, ...], b_ndim: int, b_shape: Tuple[int, ...]) -> bool:
+    """Check if quantized matrix multiplication operands are eligible for native C++ INT8 execution.
+
+    Prerequisites:
+        - Native extension is available and has `native_qmatmul`.
+        - Both operands are strictly 2D matrices (M, K) x (K, N).
+    """
+    if not is_native_available() or _native is None:
+        return False
+    if not hasattr(_native, "native_qmatmul"):
+        return False
+    if a_ndim != 2 or b_ndim != 2:
+        return False
+    return a_shape[1] == b_shape[0]
+
+
 def native_add(a_arr: np.ndarray, b_arr: np.ndarray) -> np.ndarray:
     """Execute float32 element-wise addition using the native C++ kernel."""
     if _native is None:
@@ -126,5 +142,33 @@ def native_matmul(a_arr: np.ndarray, b_arr: np.ndarray) -> np.ndarray:
 
     out_t = _native.native_matmul(t_a, t_b)
     out_shape = (a_arr.shape[0], b_arr.shape[1])
+    out_arr = np.ctypeslib.as_array(np.ctypeslib.ndpointer(dtype=np.float32, shape=out_shape).from_address(out_t.storage().data_ptr())).copy()
+    return out_arr
+
+
+def native_qmatmul(
+    a_int8: np.ndarray,
+    b_int8: np.ndarray,
+    scale_a: float,
+    zp_a: int,
+    scale_b: float,
+    zp_b: int,
+) -> np.ndarray:
+    """Execute 2D INT8 matrix multiplication using the native C++ kernel, returning float32 output."""
+    if _native is None or not hasattr(_native, "native_qmatmul"):
+        raise RuntimeError("Native C++ qmatmul is not loaded.")
+
+    shape_a = _native.Shape(list(a_int8.shape))
+    shape_b = _native.Shape(list(b_int8.shape))
+    t_a = _native.Tensor(shape_a, _native.DType.Int8)
+    t_b = _native.Tensor(shape_b, _native.DType.Int8)
+
+    c_a = np.ctypeslib.as_array(np.ctypeslib.ndpointer(dtype=np.int8, shape=a_int8.shape).from_address(t_a.storage().data_ptr()))
+    c_b = np.ctypeslib.as_array(np.ctypeslib.ndpointer(dtype=np.int8, shape=b_int8.shape).from_address(t_b.storage().data_ptr()))
+    np.copyto(c_a, a_int8)
+    np.copyto(c_b, b_int8)
+
+    out_t = _native.native_qmatmul(t_a, t_b, float(scale_a), int(zp_a), float(scale_b), int(zp_b))
+    out_shape = (a_int8.shape[0], b_int8.shape[1])
     out_arr = np.ctypeslib.as_array(np.ctypeslib.ndpointer(dtype=np.float32, shape=out_shape).from_address(out_t.storage().data_ptr())).copy()
     return out_arr
