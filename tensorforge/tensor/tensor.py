@@ -247,6 +247,27 @@ class Tensor:
         detached._grad_fn = None
         return detached
 
+    def copy(self) -> Tensor:
+        """Create a deep copy of this Tensor with its own independent physical storage.
+
+        The copied tensor preserves the shape, dtype, and requires_grad setting,
+        is a leaf node in the autograd graph, and has grad=None and grad_fn=None.
+
+        Returns:
+            An independent Tensor copy.
+        """
+        new_tensor = Tensor(
+            data=self.numpy(),
+            dtype=self._dtype,
+            shape=self._shape,
+            copy=True,
+            requires_grad=self._requires_grad,
+        )
+        new_tensor._is_leaf = True
+        new_tensor._grad_fn = None
+        new_tensor._grad = None
+        return new_tensor
+
     # -------------------------------------------------------------------------
     # Conversions & Interop
     # -------------------------------------------------------------------------

@@ -191,6 +191,107 @@ class Module:
         """Whether module is currently in training mode."""
         return self._training
 
+    def state_dict(
+        self,
+        destination: Optional[OrderedDict[str, Any]] = None,
+        prefix: str = "",
+        keep_vars: bool = False,
+    ) -> OrderedDict[str, Any]:
+        """Return a dictionary containing references to or copies of module parameters.
+
+        Args:
+            destination: Optional existing dictionary to populate.
+            prefix: Prefix to prepend to parameter names.
+            keep_vars: If True, returns original Parameter objects. If False, returns detached Tensor copies.
+
+        Returns:
+            OrderedDict mapping parameter full names to Tensor objects.
+        """
+        if destination is None:
+            destination = OrderedDict()
+
+        for name, param in self.named_parameters(prefix=prefix, recurse=True):
+            if keep_vars:
+                destination[name] = param
+            else:
+                destination[name] = param.detach().copy()
+
+        return destination
+
+    def load_state_dict(
+        self,
+        state_dict: Dict[str, Any],
+        strict: bool = True,
+    ) -> Tuple[List[str], List[str]]:
+        """Copy parameter values from a state dictionary into this module and its descendants.
+
+        Copies values into existing physical Parameter storage in-place, preserving
+        Parameter object identity, requires_grad, and leaf status without creating autograd nodes.
+
+        Args:
+            state_dict: A dictionary mapping parameter names to Tensor or array-like objects.
+            strict: Whether to strictly enforce that the keys in state_dict match the keys returned
+                by this module's named_parameters().
+
+        Returns:
+            Tuple of (missing_keys, unexpected_keys).
+
+        Raises:
+            SerializationError: If strict=True and missing or unexpected keys are found,
+                or if parameter shapes/dtypes are incompatible.
+        """
+        from tensorforge.autograd.engine import no_grad
+        from tensorforge.tensor.tensor import Tensor
+        from tensorforge.utils.validation import SerializationError
+        import numpy as np
+
+        local_params = OrderedDict(self.named_parameters(recurse=True))
+        local_keys = set(local_params.keys())
+        input_keys = set(state_dict.keys())
+
+        missing_keys = sorted(list(local_keys - input_keys))
+        unexpected_keys = sorted(list(input_keys - local_keys))
+
+        if strict:
+            error_msgs = []
+            if missing_keys:
+                error_msgs.append(f"Missing key(s) in state_dict: {missing_keys}")
+            if unexpected_keys:
+                error_msgs.append(f"Unexpected key(s) in state_dict: {unexpected_keys}")
+            if error_msgs:
+                raise SerializationError(
+                    f"Error(s) in loading state_dict for {self.__class__.__name__}:\n\t"
+                    + "\n\t".join(error_msgs)
+                )
+
+        with no_grad():
+            for name, param in local_params.items():
+                if name not in state_dict:
+                    continue
+
+                val = state_dict[name]
+                if isinstance(val, Tensor):
+                    val_arr = val.numpy()
+                    val_shape = val.shape
+                elif isinstance(val, np.ndarray):
+                    val_arr = val
+                    val_shape = val.shape
+                else:
+                    val_arr = np.asarray(val)
+                    val_shape = val_arr.shape
+
+                if param.shape != val_shape:
+                    raise SerializationError(
+                        f"Shape mismatch for parameter '{name}': expected {param.shape}, got {val_shape}"
+                    )
+
+                # In-place physical storage copy
+                target_dtype = param.dtype.numpy_dtype
+                converted_arr = val_arr.reshape(-1).astype(target_dtype, copy=False)
+                np.copyto(param.storage.to_numpy(), converted_arr)
+
+        return missing_keys, unexpected_keys
+
     def forward(self, *args: Any, **kwargs: Any) -> Any:
         """Defines the forward computation executed at every call.
 

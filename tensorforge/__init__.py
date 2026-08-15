@@ -1,6 +1,6 @@
 """TensorForge: A Memory-Aware Deep Learning Framework and Inference Engine."""
 
-from tensorforge import autograd, backend, data, native, nn, optim, quantization, training
+from tensorforge import autograd, backend, data, native, nn, optim, quantization, serialization, training
 from tensorforge.autograd.engine import backward, is_grad_enabled, no_grad
 from tensorforge.backend.dispatcher import (
     backend_context,
@@ -15,6 +15,14 @@ from tensorforge.quantization import (
     qmatmul,
     quantize,
     quantize_tensor,
+)
+from tensorforge.serialization import (
+    compute_model_size,
+    load_checkpoint,
+    load_model,
+    load_state_dict_from_file,
+    save_checkpoint,
+    save_model,
 )
 from tensorforge.tensor.dtype import (
     DType,
@@ -71,12 +79,13 @@ from tensorforge.utils.validation import (
     DTypeError,
     IndexError_,
     QuantizationError,
+    SerializationError,
     ShapeError,
     StorageError,
     TensorForgeError,
 )
 
-__version__ = "0.7.0"
+__version__ = "0.8.0"
 
 __all__ = [
     "__version__",
@@ -89,6 +98,7 @@ __all__ = [
     "native",
     "backend",
     "quantization",
+    "serialization",
     # Core
     "Tensor",
     "tensor",
@@ -97,6 +107,13 @@ __all__ = [
     "randn",
     "arange",
     "from_numpy",
+    # Serialization
+    "save_model",
+    "load_model",
+    "load_state_dict_from_file",
+    "save_checkpoint",
+    "load_checkpoint",
+    "compute_model_size",
     # Quantization
     "QuantizedTensor",
     "quantize",
@@ -161,4 +178,5 @@ __all__ = [
     "IndexError_",
     "StorageError",
     "QuantizationError",
+    "SerializationError",
 ]

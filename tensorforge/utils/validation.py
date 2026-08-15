@@ -37,6 +37,10 @@ class QuantizationError(TensorForgeError, ValueError):
     """Raised when a quantization, dequantization, or calibration operation is invalid."""
 
 
+class SerializationError(TensorForgeError, ValueError):
+    """Raised when model or checkpoint serialization, deserialization, or validation fails."""
+
+
 def validate_shape(shape: Any) -> Tuple[int, ...]:
     """Validate and normalize a shape specification.
 
