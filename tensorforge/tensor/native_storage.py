@@ -13,8 +13,12 @@ try:
     import _tensorforge_native as _native
     _NATIVE_AVAILABLE = True
 except ImportError:
-    _native = None  # type: ignore[assignment]
-    _NATIVE_AVAILABLE = False
+    try:
+        from tensorforge import _tensorforge_native as _native
+        _NATIVE_AVAILABLE = True
+    except ImportError:
+        _native = None  # type: ignore[assignment]
+        _NATIVE_AVAILABLE = False
 
 
 def is_native_available() -> bool:

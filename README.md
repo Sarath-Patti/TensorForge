@@ -4,10 +4,10 @@
 
 ---
 
-## Current Milestone: `v0.5 – Native Runtime & Performance Foundation`
+## Current Milestone: `v0.6 – Native Operation Dispatch & Runtime Integration`
 
-> **Development Status:** `v0.5 (Active Milestone)`
-> TensorForge v0.5 introduces a clean C++17 native runtime layer beneath the Python Tensor and Storage abstractions. It provides an aligned CPU memory allocator, RAII-managed native `Storage` and `Tensor` abstractions, standalone CPU kernels (element-wise add, sub, mul, and cache-friendly matrix multiplication), optional `pybind11` bindings, and a standardized benchmark suite.
+> **Development Status:** `v0.6 (Active Milestone)`
+> TensorForge v0.6 introduces a flexible **Backend Dispatcher Layer** that seamlessly integrates native C++ compute kernels (`add`, `sub`, `mul`, `matmul`) into Python `Tensor` operations while preserving `NumPy` as the robust default and automatic fallback backend.
 
 ---
 
@@ -15,9 +15,9 @@
 
 TensorForge provides explicit control over memory representation, tensor operations, automatic differentiation, neural network composition, and model training without relying on external deep learning runtimes (such as PyTorch, TensorFlow, or JAX).
 
-In **v0.5**, TensorForge features:
+In **v0.6**, TensorForge features:
 - Core multi-dimensional `Tensor` abstraction with contiguous physical storage.
-- Custom reverse-mode automatic differentiation engine (`autograd`).
+- Custom reverse-mode automatic differentiation DAG engine (`autograd`).
 - Neural network layers & activations (`Parameter`, `Module`, `Linear`, `ReLU`, `Sigmoid`, `Tanh`, `Softmax`, `MSELoss`, `CrossEntropyLoss`, `Sequential`).
 - Optimization & Training pipeline (`SGD`, `Adam`, `TensorDataset`, `DataLoader`, `Trainer`, `accuracy`).
 - **C++17 Native Runtime Subsystem (`native/`):**
@@ -25,50 +25,83 @@ In **v0.5**, TensorForge features:
   - Native C++ `Storage` with RAII memory lifetime ownership.
   - Native C++ `Tensor` and `Shape` representations preserving row-major contiguous layout.
   - Handcrafted CPU compute kernels: element-wise arithmetic and cache-aware $(i, k, j)$ matrix multiplication.
-  - Optional `pybind11` bridge (`_tensorforge_native`) and `NativeStorage` Python backend.
+- **Backend Dispatcher Subsystem (`tensorforge/backend/`):**
+  - Explicit runtime backend selection (`"numpy"` vs `"native"`).
+  - Robust automatic fallback to NumPy when native kernels are not eligible (e.g. broadcasting or non-float32 dtypes).
+  - Real-time execution tracking (`get_last_backend()`).
+  - Seamless Python autograd backpropagation across both native and NumPy forward computations.
 - **Benchmarking Suite (`benchmarks/`):**
-  - Matrix multiplication, element-wise arithmetic, and memory overhead benchmarks.
+  - Multi-backend benchmarks comparing NumPy baseline, TensorForge NumPy backend, and TensorForge Native backend.
 
 ---
 
-## Native Runtime Architecture
+## Operation Dispatch Architecture
 
 ```
-                  TensorForge
-                      │
-               Python Tensor API
-                      │
-                 Storage API
-                  /        \
-                 /          \
-        NumPyStorage      NativeStorage
-      (Default Backend) (Optional Backend)
-             │                 │
-           NumPy          C++17 Runtime
-                               │
-                     ┌─────────┴─────────┐
-                     │                   │
-                  Storage             Kernels
-                     │                   │
-                 Allocator           CPU Ops
-                                         │
-                                      Matmul
+                         Tensor Operations (a + b, a @ b)
+                                       │
+                                       ▼
+                            Backend Dispatcher Layer
+                                       │
+                    ┌──────────────────┴──────────────────┐
+                    │                                     │
+             Backend: "numpy"                      Backend: "native"
+            (Default Backend)                     (Explicit Selection)
+                    │                                     │
+                    ▼                                     ▼
+             NumPy Backend                     Is Native Op Supported?
+          (NumPy CPU Kernels)                   (Float32, Shapes Match)
+                    │                                /            \
+                    │                          [YES]               [NO]
+                    │                            │                   │
+                    │                            ▼                   ▼
+                    │                     Native Backend       NumPy Fallback
+                    │                    (C++17 Kernels)     (Explicit Fallback)
+                    │                            │                   │
+                    └────────────────────────────┼───────────────────┘
+                                                 │
+                                                 ▼
+                                        Result Tensor / Autograd
 ```
 
 ---
 
-## Supported Native & Python Components (v0.5)
+## Backend Selection & Control API
 
-| Component | Layer | Description |
+```python
+import tensorforge as tf
+
+# Check default backend (always 'numpy')
+print(tf.get_backend())  # Output: 'numpy'
+
+# Switch to Native C++ execution (requires compiled native extension)
+tf.set_backend("native")
+
+# Execute operations
+a = tf.randn((256, 256), dtype=tf.float32)
+b = tf.randn((256, 256), dtype=tf.float32)
+c = a @ b
+
+# Check which backend executed the operation
+print(tf.get_last_backend())  # Output: 'native'
+
+# Scoped execution context
+with tf.backend_context("numpy"):
+    d = a + b
+    print(tf.get_last_backend())  # Output: 'numpy'
+```
+
+---
+
+## Supported Native Operations & Fallback Behavior
+
+| Operation | Native C++ Fast Path | Automatic Fallback Conditions |
 |---|---|---|
-| **`DefaultCPUAllocator`** | Native C++ | 64-byte aligned memory allocator tracking active allocations |
-| **`Storage`** | Native C++ | RAII contiguous memory buffer on CPU |
-| **`Tensor`** | Native C++ | Lightweight native tensor with shape and stride metadata |
-| **`kernels::matmul`** | Native C++ | Cache-aware $(i, k, j)$ float32 matrix multiplication kernel |
-| **`kernels::add/sub/mul`** | Native C++ | Vectorized element-wise float32 operations |
-| **`NativeStorage`** | Python | Optional backend storage interfacing with C++ runtime |
-| **`NumPyStorage`** | Python | Reference contiguous storage backend (Default) |
-| **`profile`** | Python | Lightweight wall-clock profiling context manager |
+| **`matmul` (`@`)** | 2D `float32` matrices: $(M, K) \times (K, N) \to (M, N)$ | 1D vectors, Batched 3D+ tensors, non-`float32` dtypes |
+| **`add` (`+`)** | Same-shape `float32` tensors | Multi-dimensional broadcasting, scalar operands, non-`float32` dtypes |
+| **`sub` (`-`)** | Same-shape `float32` tensors | Multi-dimensional broadcasting, scalar operands, non-`float32` dtypes |
+| **`mul` (`*`)** | Same-shape `float32` tensors | Multi-dimensional broadcasting, scalar operands, non-`float32` dtypes |
+| **Other Ops** | Division, Negation, Reductions, Activations, Losses | Executed via reference NumPy backend |
 
 ---
 
@@ -94,10 +127,10 @@ ctest --test-dir native/build --output-on-failure
 ## Running Benchmarks & Demonstrations
 
 ```bash
-# Matrix multiplication benchmark
+# Multi-backend Matrix multiplication benchmark
 python benchmarks/benchmark_matmul.py
 
-# Element-wise operations benchmark
+# Multi-backend Element-wise operations benchmark
 python benchmarks/benchmark_elementwise.py
 
 # Memory introspection benchmark
@@ -113,30 +146,21 @@ python examples/training_demo.py
 
 ```
 TensorForge/
-├── native/                          # NEW: Native C++17 Runtime
+├── native/                          # Native C++17 Runtime
 │   ├── CMakeLists.txt               # CMake configuration
-│   ├── include/tensorforge/         # Public C++ headers
-│   │   ├── dtype.hpp                # DType enum & metadata
-│   │   ├── shape.hpp                # Shape & contiguous stride calculation
-│   │   ├── allocator.hpp            # Allocator interface & DefaultCPUAllocator
-│   │   ├── storage.hpp              # Native Storage RAII buffer
-│   │   ├── tensor.hpp               # Native Tensor metadata & buffer link
-│   │   └── kernels.hpp              # Element-wise and Matmul kernel declarations
-│   ├── src/                         # Native C++ implementations
-│   │   ├── dtype.cpp
-│   │   ├── shape.cpp
-│   │   ├── allocator.cpp
-│   │   ├── storage.cpp
-│   │   ├── tensor.cpp
-│   │   ├── kernels.cpp
-│   │   └── bindings.cpp             # pybind11 module bindings
+│   ├── include/tensorforge/         # Public C++ headers (dtype, shape, allocator, storage, tensor, kernels)
+│   ├── src/                         # Native C++ implementations & pybind11 bindings
 │   └── tests/
 │       └── test_native.cpp          # Standalone C++ test suite
 │
 ├── tensorforge/
-│   ├── __init__.py                  # Top-level exports & version (0.5.0)
-│   ├── native/                      # NEW: Python native subpackage
-│   │   └── __init__.py              # Native availability & operations
+│   ├── __init__.py                  # Top-level exports & version (0.6.0)
+│   ├── backend/                     # NEW: Backend Dispatcher Subsystem
+│   │   ├── __init__.py              # Backend exports
+│   │   ├── dispatcher.py            # Global & scoped backend management
+│   │   ├── numpy_backend.py         # Reference NumPy operations
+│   │   └── native_backend.py        # Native C++ kernel interop & checks
+│   ├── native/                      # Python native subpackage
 │   ├── optim/                       # Optimizer subsystem (SGD, Adam)
 │   ├── data/                        # Data loading subsystem (Dataset, DataLoader)
 │   ├── training/                    # Training loop & metrics (Trainer, accuracy)
@@ -144,15 +168,24 @@ TensorForge/
 │   ├── autograd/                    # Automatic Differentiation DAG engine
 │   ├── tensor/                      # Core Tensor subsystem (Tensor, Storage, NumPyStorage, NativeStorage)
 │   └── utils/
-│       ├── __init__.py
 │       ├── validation.py
-│       └── profiling.py             # NEW: Profile context manager
+│       └── profiling.py             # Profiling context manager with backend reporting
 │
-├── benchmarks/                      # NEW: Benchmark framework
+├── benchmarks/                      # Benchmark Suite
 │   ├── README.md
-│   ├── benchmark_matmul.py
-│   ├── benchmark_elementwise.py
-│   └── benchmark_memory.py
+│   ├── benchmark_matmul.py          # Multi-backend matmul benchmark
+│   ├── benchmark_elementwise.py     # Multi-backend elementwise benchmark
+│   └── benchmark_memory.py          # Memory overhead & allocation benchmark
+│
+├── tests/                           # Python Test Suite
+│   ├── backend/                     # NEW: Backend & Native Dispatch tests
+│   │   ├── test_dispatcher.py
+│   │   └── test_native_ops.py
+│   ├── autograd/
+│   ├── nn/
+│   ├── optim/
+│   ├── tensor/
+│   └── training/
 │
 ├── examples/                        # Demonstrations
 │   ├── basic_tensor.py
@@ -175,7 +208,7 @@ TensorForge/
 | **v0.2 – Automatic Differentiation** | **Complete** | Reverse-mode autodiff DAG engine, topological backpropagation, broadcast reductions |
 | **v0.3 – Neural Network Modules & Layers** | **Complete** | Parameter, Module, Linear, Activations (ReLU, Sigmoid, Tanh, Softmax), Losses, Sequential |
 | **v0.4 – Optimizers & Training Pipeline** | **Complete** | SGD, Adam, Dataset, DataLoader, Trainer, Metrics, Training History |
-| **v0.5 – Native Runtime & Performance Foundation** | **Current** | C++17 runtime, CPU allocator, native storage, CPU kernels, benchmark suite |
-| **v0.6 – Advanced Inference Runtime & Allocators** | Planned | Memory arena allocators, SIMD/AVX vectorization, graph execution engine |
-| **v0.7 – Quantization & Graph Optimizations** | Planned | INT8/FP16 post-training quantization, operator fusion, constant folding |
-| **v0.8 – Production Inference Engine & C API** | Planned | High-throughput serving runtime, batching queue, C/C++ embedding API |
+| **v0.5 – Native Runtime & Performance Foundation** | **Complete** | C++17 runtime, CPU allocator, native storage, CPU kernels, benchmark suite |
+| **v0.6 – Native Operation Dispatch & Runtime Integration** | **Current** | Backend dispatcher, runtime backend switching, automatic NumPy fallback, autograd integration |
+| **v0.7 – Advanced Memory Allocators & Inference Runtime** | Planned | Arena allocators, memory pooling, SIMD/AVX vectorization, graph execution engine |
+| **v0.8 – Quantization & Graph Optimizations** | Planned | INT8/FP16 post-training quantization, operator fusion, constant folding |

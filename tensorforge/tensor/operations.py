@@ -36,7 +36,7 @@ def _ensure_tensor(val: Any) -> Tensor:
 
 
 def add(a: Union[Tensor, float, int], b: Union[Tensor, float, int]) -> Tensor:
-    """Element-wise addition supporting broadcasting and scalar operands.
+    """Element-wise addition supporting broadcasting, scalar operands, and native dispatch.
 
     Args:
         a: Left operand (Tensor, int, or float).
@@ -47,6 +47,9 @@ def add(a: Union[Tensor, float, int], b: Union[Tensor, float, int]) -> Tensor:
     """
     from tensorforge.autograd.engine import is_grad_enabled
     from tensorforge.autograd.function import AddBackward
+    from tensorforge.backend.dispatcher import get_backend, set_last_backend
+    from tensorforge.backend.native_backend import can_native_elementwise, native_add
+    from tensorforge.backend.numpy_backend import numpy_add
     from tensorforge.tensor.tensor import Tensor
 
     t_a = _ensure_tensor(a)
@@ -56,10 +59,17 @@ def add(a: Union[Tensor, float, int], b: Union[Tensor, float, int]) -> Tensor:
     validate_broadcast_shapes(t_a.shape, t_b.shape)
     out_dtype = promote_dtypes(t_a.dtype, t_b.dtype)
 
-    result_arr = np.add(
-        t_a.numpy().astype(out_dtype.numpy_dtype, copy=False),
-        t_b.numpy().astype(out_dtype.numpy_dtype, copy=False),
-    )
+    backend = get_backend()
+    arr_a = t_a.numpy().astype(out_dtype.numpy_dtype, copy=False)
+    arr_b = t_b.numpy().astype(out_dtype.numpy_dtype, copy=False)
+
+    if backend == "native" and can_native_elementwise(out_dtype, t_a.shape, out_dtype, t_b.shape):
+        result_arr = native_add(arr_a, arr_b)
+        set_last_backend("native")
+    else:
+        result_arr = numpy_add(arr_a, arr_b)
+        set_last_backend("native (fallback)" if backend == "native" else "numpy")
+
     result_tensor = Tensor(result_arr, dtype=out_dtype)
 
     if is_grad_enabled() and (t_a.requires_grad or t_b.requires_grad):
@@ -70,7 +80,7 @@ def add(a: Union[Tensor, float, int], b: Union[Tensor, float, int]) -> Tensor:
 
 
 def sub(a: Union[Tensor, float, int], b: Union[Tensor, float, int]) -> Tensor:
-    """Element-wise subtraction supporting broadcasting and scalar operands.
+    """Element-wise subtraction supporting broadcasting, scalar operands, and native dispatch.
 
     Args:
         a: Left operand (Tensor, int, or float).
@@ -81,6 +91,9 @@ def sub(a: Union[Tensor, float, int], b: Union[Tensor, float, int]) -> Tensor:
     """
     from tensorforge.autograd.engine import is_grad_enabled
     from tensorforge.autograd.function import SubBackward
+    from tensorforge.backend.dispatcher import get_backend, set_last_backend
+    from tensorforge.backend.native_backend import can_native_elementwise, native_sub
+    from tensorforge.backend.numpy_backend import numpy_sub
     from tensorforge.tensor.tensor import Tensor
 
     t_a = _ensure_tensor(a)
@@ -89,10 +102,17 @@ def sub(a: Union[Tensor, float, int], b: Union[Tensor, float, int]) -> Tensor:
     validate_broadcast_shapes(t_a.shape, t_b.shape)
     out_dtype = promote_dtypes(t_a.dtype, t_b.dtype)
 
-    result_arr = np.subtract(
-        t_a.numpy().astype(out_dtype.numpy_dtype, copy=False),
-        t_b.numpy().astype(out_dtype.numpy_dtype, copy=False),
-    )
+    backend = get_backend()
+    arr_a = t_a.numpy().astype(out_dtype.numpy_dtype, copy=False)
+    arr_b = t_b.numpy().astype(out_dtype.numpy_dtype, copy=False)
+
+    if backend == "native" and can_native_elementwise(out_dtype, t_a.shape, out_dtype, t_b.shape):
+        result_arr = native_sub(arr_a, arr_b)
+        set_last_backend("native")
+    else:
+        result_arr = numpy_sub(arr_a, arr_b)
+        set_last_backend("native (fallback)" if backend == "native" else "numpy")
+
     result_tensor = Tensor(result_arr, dtype=out_dtype)
 
     if is_grad_enabled() and (t_a.requires_grad or t_b.requires_grad):
@@ -103,7 +123,7 @@ def sub(a: Union[Tensor, float, int], b: Union[Tensor, float, int]) -> Tensor:
 
 
 def mul(a: Union[Tensor, float, int], b: Union[Tensor, float, int]) -> Tensor:
-    """Element-wise multiplication supporting broadcasting and scalar operands.
+    """Element-wise multiplication supporting broadcasting, scalar operands, and native dispatch.
 
     Args:
         a: Left operand (Tensor, int, or float).
@@ -114,6 +134,9 @@ def mul(a: Union[Tensor, float, int], b: Union[Tensor, float, int]) -> Tensor:
     """
     from tensorforge.autograd.engine import is_grad_enabled
     from tensorforge.autograd.function import MulBackward
+    from tensorforge.backend.dispatcher import get_backend, set_last_backend
+    from tensorforge.backend.native_backend import can_native_elementwise, native_mul
+    from tensorforge.backend.numpy_backend import numpy_mul
     from tensorforge.tensor.tensor import Tensor
 
     t_a = _ensure_tensor(a)
@@ -122,10 +145,17 @@ def mul(a: Union[Tensor, float, int], b: Union[Tensor, float, int]) -> Tensor:
     validate_broadcast_shapes(t_a.shape, t_b.shape)
     out_dtype = promote_dtypes(t_a.dtype, t_b.dtype)
 
-    result_arr = np.multiply(
-        t_a.numpy().astype(out_dtype.numpy_dtype, copy=False),
-        t_b.numpy().astype(out_dtype.numpy_dtype, copy=False),
-    )
+    backend = get_backend()
+    arr_a = t_a.numpy().astype(out_dtype.numpy_dtype, copy=False)
+    arr_b = t_b.numpy().astype(out_dtype.numpy_dtype, copy=False)
+
+    if backend == "native" and can_native_elementwise(out_dtype, t_a.shape, out_dtype, t_b.shape):
+        result_arr = native_mul(arr_a, arr_b)
+        set_last_backend("native")
+    else:
+        result_arr = numpy_mul(arr_a, arr_b)
+        set_last_backend("native (fallback)" if backend == "native" else "numpy")
+
     result_tensor = Tensor(result_arr, dtype=out_dtype)
 
     if is_grad_enabled() and (t_a.requires_grad or t_b.requires_grad):
@@ -194,11 +224,11 @@ def neg(a: Tensor) -> Tensor:
 
 
 def matmul(a: Tensor, b: Tensor) -> Tensor:
-    """Matrix multiplication (@) of two tensors.
+    """Matrix multiplication (@) of two tensors with native dispatch support.
 
     Supports:
     - 1D @ 1D -> scalar dot product
-    - 2D @ 2D -> (M, K) @ (K, N) -> (M, N)
+    - 2D @ 2D -> (M, K) @ (K, N) -> (M, N) (Native CPU fast-path for float32)
     - 1D @ 2D -> (K,) @ (K, N) -> (N,)
     - 2D @ 1D -> (M, K) @ (K,) -> (M,)
     - Batched: (..., M, K) @ (..., K, N) -> (..., M, N)
@@ -215,16 +245,26 @@ def matmul(a: Tensor, b: Tensor) -> Tensor:
     """
     from tensorforge.autograd.engine import is_grad_enabled
     from tensorforge.autograd.function import MatmulBackward
+    from tensorforge.backend.dispatcher import get_backend, set_last_backend
+    from tensorforge.backend.native_backend import can_native_matmul, native_matmul
+    from tensorforge.backend.numpy_backend import numpy_matmul
     from tensorforge.tensor.tensor import Tensor
 
     # Validate shapes and compute expected output shape
     expected_shape = validate_matmul_shapes(a.shape, b.shape)
     out_dtype = promote_dtypes(a.dtype, b.dtype)
 
+    backend = get_backend()
     arr_a = a.numpy().astype(out_dtype.numpy_dtype, copy=False)
     arr_b = b.numpy().astype(out_dtype.numpy_dtype, copy=False)
 
-    result_arr = np.matmul(arr_a, arr_b)
+    if backend == "native" and can_native_matmul(out_dtype, a.ndim, a.shape, out_dtype, b.ndim, b.shape):
+        result_arr = native_matmul(arr_a, arr_b)
+        set_last_backend("native")
+    else:
+        result_arr = numpy_matmul(arr_a, arr_b)
+        set_last_backend("native (fallback)" if backend == "native" else "numpy")
+
     result_tensor = Tensor(result_arr, dtype=out_dtype)
 
     # Double check resulting shape matches validated shape

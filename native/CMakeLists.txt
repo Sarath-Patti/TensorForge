@@ -34,10 +34,40 @@ target_include_directories(tensorforge_native PUBLIC
 option(BUILD_PYTHON_BINDINGS "Build Python pybind11 bindings" ON)
 
 if(BUILD_PYTHON_BINDINGS)
+    # Prefer active python3 from environment PATH if not explicitly overridden
+    if(NOT DEFINED Python3_EXECUTABLE)
+        find_program(_PYTHON_IN_PATH NAMES python3 python)
+        if(_PYTHON_IN_PATH)
+            set(Python3_EXECUTABLE "${_PYTHON_IN_PATH}" CACHE FILEPATH "Path to Python3 executable" FORCE)
+        endif()
+    endif()
+
+    find_package(Python3 COMPONENTS Interpreter Development.Module QUIET)
+    if(Python3_FOUND)
+        execute_process(
+            COMMAND "${Python3_EXECUTABLE}" -m pybind11 --cmakedir
+            OUTPUT_VARIABLE _pybind11_cmakedir
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET
+            RESULT_VARIABLE _pybind11_res
+        )
+        if(_pybind11_res EQUAL 0 AND EXISTS "${_pybind11_cmakedir}")
+            set(pybind11_DIR "${_pybind11_cmakedir}")
+        endif()
+    endif()
+
     find_package(pybind11 CONFIG QUIET)
+
     if(pybind11_FOUND)
+        message(STATUS "Found pybind11: ${pybind11_DIR} (version \"${pybind11_VERSION}\")")
         pybind11_add_module(_tensorforge_native src/bindings.cpp)
         target_link_libraries(_tensorforge_native PRIVATE tensorforge_native)
+
+        # Output the compiled extension directly into tensorforge/ directory so Python can import it immediately
+        set_target_properties(_tensorforge_native PROPERTIES
+            LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/../tensorforge"
+            RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/../tensorforge"
+        )
     else()
         message(STATUS "pybind11 not found; skipping _tensorforge_native Python extension target.")
     endif()

@@ -1,7 +1,13 @@
 """TensorForge: A Memory-Aware Deep Learning Framework and Inference Engine."""
 
-from tensorforge import autograd, data, native, nn, optim, training
+from tensorforge import autograd, backend, data, native, nn, optim, training
 from tensorforge.autograd.engine import backward, is_grad_enabled, no_grad
+from tensorforge.backend.dispatcher import (
+    backend_context,
+    get_backend,
+    get_last_backend,
+    set_backend,
+)
 from tensorforge.tensor.dtype import (
     DType,
     bool_,
@@ -61,7 +67,7 @@ from tensorforge.utils.validation import (
     TensorForgeError,
 )
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
 __all__ = [
     "__version__",
@@ -72,6 +78,7 @@ __all__ = [
     "data",
     "training",
     "native",
+    "backend",
     # Core
     "Tensor",
     "tensor",
@@ -80,6 +87,11 @@ __all__ = [
     "randn",
     "arange",
     "from_numpy",
+    # Backend Control
+    "set_backend",
+    "get_backend",
+    "get_last_backend",
+    "backend_context",
     # Autograd
     "backward",
     "no_grad",

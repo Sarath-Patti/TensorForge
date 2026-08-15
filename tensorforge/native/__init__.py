@@ -10,7 +10,10 @@ from tensorforge.tensor.native_storage import is_native_available
 try:
     import _tensorforge_native as _native
 except ImportError:
-    _native = None
+    try:
+        from tensorforge import _tensorforge_native as _native
+    except ImportError:
+        _native = None
 
 
 def native_add(a: Any, b: Any) -> Any:

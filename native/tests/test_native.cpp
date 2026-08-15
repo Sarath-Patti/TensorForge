@@ -23,11 +23,14 @@ void test_shape() {
     assert(strides[0] == 12);
     assert(strides[1] == 4);
     assert(strides[2] == 1);
+    (void)strides;
 
     Shape s2({2, 3, 4});
     Shape s3({2, 3, 5});
     assert(s1 == s2);
     assert(s1 != s3);
+    (void)s2;
+    (void)s3;
     std::cout << "  -> Shape PASSED" << std::endl;
 }
 
@@ -53,9 +56,11 @@ void test_allocator_and_storage() {
         for (int i = 0; i < 100; ++i) {
             assert(data[i] == 0.0f);
         }
+        (void)data;
     }
 
     assert(alloc->allocated_bytes() == before);
+    (void)before;
     std::cout << "  -> Allocator & Storage PASSED" << std::endl;
 }
 
@@ -71,12 +76,14 @@ void test_tensor_and_kernels() {
     for (int i = 0; i < 4; ++i) {
         assert(out_ptr[i] == 2.0f);
     }
+    (void)out_ptr;
 
     kernels::mul(out, b, a);
     const float* a_ptr = a.data_ptr<float>();
     for (int i = 0; i < 4; ++i) {
         assert(a_ptr[i] == 2.0f);
     }
+    (void)a_ptr;
 
     kernels::add_scalar(a, 3.0f, out);
     for (int i = 0; i < 4; ++i) {
@@ -87,14 +94,6 @@ void test_tensor_and_kernels() {
 
 void test_matmul() {
     std::cout << "[Test] Matmul Kernel..." << std::endl;
-    // A: (2, 3), B: (3, 2), Out: (2, 2)
-    // A = [[1, 2, 3],
-    //      [4, 5, 6]]
-    // B = [[7, 8],
-    //      [9, 1],
-    //      [2, 3]]
-    // Expected C = [[31, 19],
-    //               [85, 55]]
     Tensor a = Tensor::empty(Shape({2, 3}), DType::Float32);
     Tensor b = Tensor::empty(Shape({3, 2}), DType::Float32);
     Tensor c = Tensor::empty(Shape({2, 2}), DType::Float32);
@@ -115,6 +114,7 @@ void test_matmul() {
     assert(std::fabs(c_ptr[1] - 19.0f) < 1e-5f);
     assert(std::fabs(c_ptr[2] - 85.0f) < 1e-5f);
     assert(std::fabs(c_ptr[3] - 55.0f) < 1e-5f);
+    (void)c_ptr;
 
     std::cout << "  -> Matmul Kernel PASSED" << std::endl;
 }

@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools>=61.0"]
+requires = ["setuptools>=61.0", "pybind11>=2.10.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "tensorforge"
-version = "0.1.0"
+version = "0.6.0"
 description = "A memory-aware deep learning framework and inference engine."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -29,6 +29,10 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0.0",
+    "pybind11>=2.10.0",
+]
+native = [
+    "pybind11>=2.10.0",
 ]
 
 [tool.setuptools.packages.find]
