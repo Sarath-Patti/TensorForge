@@ -9,6 +9,7 @@ from tensorforge.nn.module import Module
 from tensorforge.optim.optimizer import Optimizer
 from tensorforge.quantization.quantized_tensor import QuantizedTensor
 from tensorforge.serialization.format import (
+    extract_module_architecture,
     read_tfckpt_container,
     read_tfmodel_container,
     write_tfckpt_container,
@@ -30,14 +31,16 @@ def save_model(
         filepath: Destination file path (e.g., 'model.tfmodel').
         metadata: Optional dictionary of additional model metadata or configuration.
     """
+    architecture = None
     if isinstance(model, Module):
         state_dict = model.state_dict()
+        architecture = extract_module_architecture(model)
     elif isinstance(model, dict):
         state_dict = model
     else:
         raise SerializationError(f"Expected Module or state_dict dictionary, got {type(model).__name__}")
 
-    write_tfmodel_container(filepath, state_dict, metadata=metadata)
+    write_tfmodel_container(filepath, state_dict, metadata=metadata, architecture=architecture)
 
 
 def load_model(

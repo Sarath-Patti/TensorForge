@@ -15,7 +15,62 @@ from tensorforge.tensor.tensor import Tensor
 from tensorforge.utils.validation import SerializationError
 
 FORMAT_VERSION = "1.0"
-LIBRARY_VERSION = "0.8.0"
+LIBRARY_VERSION = "0.9.0"
+
+
+def extract_module_architecture(module: Any) -> Optional[Dict[str, Any]]:
+    """Extract serializable architecture specification from a Module instance.
+
+    Supports standard TensorForge layers:
+        - Sequential
+        - Linear
+        - ReLU
+        - Sigmoid
+        - Tanh
+        - Softmax
+
+    Args:
+        module: A TensorForge Module instance.
+
+    Returns:
+        Dictionary representation of the module architecture, or None if not a Module.
+    """
+    from tensorforge.nn.activations import ReLU, Sigmoid, Softmax, Tanh
+    from tensorforge.nn.linear import Linear
+    from tensorforge.nn.module import Module
+    from tensorforge.nn.sequential import Sequential
+
+    if not isinstance(module, Module):
+        return None
+
+    if isinstance(module, Linear):
+        return {
+            "type": "Linear",
+            "in_features": module.in_features,
+            "out_features": module.out_features,
+            "bias": module.bias is not None,
+            "dtype": str(module.dtype),
+        }
+    elif isinstance(module, ReLU):
+        return {"type": "ReLU"}
+    elif isinstance(module, Sigmoid):
+        return {"type": "Sigmoid"}
+    elif isinstance(module, Tanh):
+        return {"type": "Tanh"}
+    elif isinstance(module, Softmax):
+        return {"type": "Softmax", "dim": module.dim}
+    elif isinstance(module, Sequential):
+        layers = []
+        for name, submod in module._modules.items():
+            if submod is not None:
+                sub_config = extract_module_architecture(submod)
+                if sub_config is not None:
+                    layers.append({"name": name, "module": sub_config})
+        return {
+            "type": "Sequential",
+            "layers": layers,
+        }
+    return {"type": module.__class__.__name__}
 
 
 def serialize_state_dict_to_zip(
@@ -144,17 +199,24 @@ def write_tfmodel_container(
     filepath: str,
     model_state_dict: Dict[str, Any],
     metadata: Optional[Dict[str, Any]] = None,
+    architecture: Optional[Dict[str, Any]] = None,
 ) -> None:
-    """Write model weights and metadata into a .tfmodel zip archive.
+    """Write model weights, architecture, and metadata into a .tfmodel zip archive.
 
     Args:
         filepath: Destination file path.
         model_state_dict: Dictionary of parameter tensors.
         metadata: Optional user/model metadata dictionary.
+        architecture: Optional model architecture configuration dictionary.
     """
     try:
         with zipfile.ZipFile(filepath, "w", compression=zipfile.ZIP_DEFLATED) as zf:
             tensors_meta = serialize_state_dict_to_zip(model_state_dict, zf, prefix="tensors")
+
+            # Check if architecture is in metadata or passed explicitly
+            arch_meta = architecture
+            if arch_meta is None and metadata and "architecture" in metadata:
+                arch_meta = metadata["architecture"]
 
             header_meta = {
                 "format_version": FORMAT_VERSION,
@@ -163,6 +225,7 @@ def write_tfmodel_container(
                 "timestamp": time.time(),
                 "num_parameters": len(model_state_dict),
                 "total_nbytes": sum(m.get("nbytes", 0) for m in tensors_meta.values()),
+                "architecture": arch_meta,
                 "user_metadata": metadata or {},
                 "tensors": tensors_meta,
             }

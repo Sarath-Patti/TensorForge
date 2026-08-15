@@ -1,12 +1,16 @@
 """TensorForge: A Memory-Aware Deep Learning Framework and Inference Engine."""
 
-from tensorforge import autograd, backend, data, native, nn, optim, quantization, serialization, training
+from tensorforge import autograd, backend, data, inference, native, nn, optim, quantization, serialization, training
 from tensorforge.autograd.engine import backward, is_grad_enabled, no_grad
 from tensorforge.backend.dispatcher import (
     backend_context,
     get_backend,
     get_last_backend,
     set_backend,
+)
+from tensorforge.inference import (
+    InferenceRuntime,
+    ModelLoader,
 )
 from tensorforge.quantization import (
     QuantizedTensor,
@@ -85,7 +89,7 @@ from tensorforge.utils.validation import (
     TensorForgeError,
 )
 
-__version__ = "0.8.0"
+__version__ = "0.9.0"
 
 __all__ = [
     "__version__",
@@ -99,6 +103,7 @@ __all__ = [
     "backend",
     "quantization",
     "serialization",
+    "inference",
     # Core
     "Tensor",
     "tensor",
@@ -107,6 +112,9 @@ __all__ = [
     "randn",
     "arange",
     "from_numpy",
+    # Inference Runtime
+    "InferenceRuntime",
+    "ModelLoader",
     # Serialization
     "save_model",
     "load_model",

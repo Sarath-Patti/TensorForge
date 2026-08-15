@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Optional, Tuple
+import ctypes
+from typing import Optional, Tuple, Union
 import numpy as np
 
 from tensorforge.tensor.dtype import float32
@@ -15,6 +16,24 @@ except ImportError:
         from tensorforge import _tensorforge_native as _native
     except ImportError:
         _native = None
+
+
+def _ptr_to_numpy(ptr: int, shape: Tuple[int, ...], dtype: Union[np.dtype, type, str]) -> np.ndarray:
+    """Create a zero-copy NumPy array view from a raw virtual memory address.
+
+    Args:
+        ptr: Virtual memory address as an integer.
+        shape: Desired tensor shape.
+        dtype: NumPy data type.
+
+    Returns:
+        NumPy array view referencing the raw memory buffer.
+    """
+    resolved_dtype = np.dtype(dtype)
+    numel = int(np.prod(shape))
+    nbytes = numel * resolved_dtype.itemsize
+    buf = (ctypes.c_char * nbytes).from_address(ptr)
+    return np.frombuffer(buf, dtype=resolved_dtype).reshape(shape)
 
 
 def can_native_elementwise(a_dtype: object, a_shape: Tuple[int, ...], b_dtype: object, b_shape: Tuple[int, ...]) -> bool:
@@ -75,13 +94,13 @@ def native_add(a_arr: np.ndarray, b_arr: np.ndarray) -> np.ndarray:
     t_b = _native.Tensor(shape, _native.DType.Float32)
 
     # Copy input arrays into native storage
-    c_a = np.ctypeslib.as_array((ctypes_float := np.ctypeslib.ndpointer(dtype=np.float32, shape=a_arr.shape)).from_address(t_a.storage().data_ptr()))
-    c_b = np.ctypeslib.as_array(ctypes_float.from_address(t_b.storage().data_ptr()))
+    c_a = _ptr_to_numpy(t_a.storage().data_ptr(), a_arr.shape, np.float32)
+    c_b = _ptr_to_numpy(t_b.storage().data_ptr(), b_arr.shape, np.float32)
     np.copyto(c_a, a_arr)
     np.copyto(c_b, b_arr)
 
     out_t = _native.native_add(t_a, t_b)
-    out_arr = np.ctypeslib.as_array(ctypes_float.from_address(out_t.storage().data_ptr())).copy()
+    out_arr = _ptr_to_numpy(out_t.storage().data_ptr(), a_arr.shape, np.float32).copy()
     return out_arr
 
 
@@ -94,14 +113,13 @@ def native_sub(a_arr: np.ndarray, b_arr: np.ndarray) -> np.ndarray:
     t_a = _native.Tensor(shape, _native.DType.Float32)
     t_b = _native.Tensor(shape, _native.DType.Float32)
 
-    ctypes_float = np.ctypeslib.ndpointer(dtype=np.float32, shape=a_arr.shape)
-    c_a = np.ctypeslib.as_array(ctypes_float.from_address(t_a.storage().data_ptr()))
-    c_b = np.ctypeslib.as_array(ctypes_float.from_address(t_b.storage().data_ptr()))
+    c_a = _ptr_to_numpy(t_a.storage().data_ptr(), a_arr.shape, np.float32)
+    c_b = _ptr_to_numpy(t_b.storage().data_ptr(), b_arr.shape, np.float32)
     np.copyto(c_a, a_arr)
     np.copyto(c_b, b_arr)
 
     out_t = _native.native_sub(t_a, t_b)
-    out_arr = np.ctypeslib.as_array(ctypes_float.from_address(out_t.storage().data_ptr())).copy()
+    out_arr = _ptr_to_numpy(out_t.storage().data_ptr(), a_arr.shape, np.float32).copy()
     return out_arr
 
 
@@ -114,14 +132,13 @@ def native_mul(a_arr: np.ndarray, b_arr: np.ndarray) -> np.ndarray:
     t_a = _native.Tensor(shape, _native.DType.Float32)
     t_b = _native.Tensor(shape, _native.DType.Float32)
 
-    ctypes_float = np.ctypeslib.ndpointer(dtype=np.float32, shape=a_arr.shape)
-    c_a = np.ctypeslib.as_array(ctypes_float.from_address(t_a.storage().data_ptr()))
-    c_b = np.ctypeslib.as_array(ctypes_float.from_address(t_b.storage().data_ptr()))
+    c_a = _ptr_to_numpy(t_a.storage().data_ptr(), a_arr.shape, np.float32)
+    c_b = _ptr_to_numpy(t_b.storage().data_ptr(), b_arr.shape, np.float32)
     np.copyto(c_a, a_arr)
     np.copyto(c_b, b_arr)
 
     out_t = _native.native_mul(t_a, t_b)
-    out_arr = np.ctypeslib.as_array(ctypes_float.from_address(out_t.storage().data_ptr())).copy()
+    out_arr = _ptr_to_numpy(out_t.storage().data_ptr(), a_arr.shape, np.float32).copy()
     return out_arr
 
 
@@ -135,14 +152,14 @@ def native_matmul(a_arr: np.ndarray, b_arr: np.ndarray) -> np.ndarray:
     t_a = _native.Tensor(shape_a, _native.DType.Float32)
     t_b = _native.Tensor(shape_b, _native.DType.Float32)
 
-    c_a = np.ctypeslib.as_array(np.ctypeslib.ndpointer(dtype=np.float32, shape=a_arr.shape).from_address(t_a.storage().data_ptr()))
-    c_b = np.ctypeslib.as_array(np.ctypeslib.ndpointer(dtype=np.float32, shape=b_arr.shape).from_address(t_b.storage().data_ptr()))
+    c_a = _ptr_to_numpy(t_a.storage().data_ptr(), a_arr.shape, np.float32)
+    c_b = _ptr_to_numpy(t_b.storage().data_ptr(), b_arr.shape, np.float32)
     np.copyto(c_a, a_arr)
     np.copyto(c_b, b_arr)
 
     out_t = _native.native_matmul(t_a, t_b)
     out_shape = (a_arr.shape[0], b_arr.shape[1])
-    out_arr = np.ctypeslib.as_array(np.ctypeslib.ndpointer(dtype=np.float32, shape=out_shape).from_address(out_t.storage().data_ptr())).copy()
+    out_arr = _ptr_to_numpy(out_t.storage().data_ptr(), out_shape, np.float32).copy()
     return out_arr
 
 
@@ -163,12 +180,12 @@ def native_qmatmul(
     t_a = _native.Tensor(shape_a, _native.DType.Int8)
     t_b = _native.Tensor(shape_b, _native.DType.Int8)
 
-    c_a = np.ctypeslib.as_array(np.ctypeslib.ndpointer(dtype=np.int8, shape=a_int8.shape).from_address(t_a.storage().data_ptr()))
-    c_b = np.ctypeslib.as_array(np.ctypeslib.ndpointer(dtype=np.int8, shape=b_int8.shape).from_address(t_b.storage().data_ptr()))
+    c_a = _ptr_to_numpy(t_a.storage().data_ptr(), a_int8.shape, np.int8)
+    c_b = _ptr_to_numpy(t_b.storage().data_ptr(), b_int8.shape, np.int8)
     np.copyto(c_a, a_int8)
     np.copyto(c_b, b_int8)
 
     out_t = _native.native_qmatmul(t_a, t_b, float(scale_a), int(zp_a), float(scale_b), int(zp_b))
     out_shape = (a_int8.shape[0], b_int8.shape[1])
-    out_arr = np.ctypeslib.as_array(np.ctypeslib.ndpointer(dtype=np.float32, shape=out_shape).from_address(out_t.storage().data_ptr())).copy()
+    out_arr = _ptr_to_numpy(out_t.storage().data_ptr(), out_shape, np.float32).copy()
     return out_arr

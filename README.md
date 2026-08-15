@@ -4,18 +4,18 @@
 
 ---
 
-## Current Milestone: `v0.8 – Model Serialization & Checkpointing`
+## Current Milestone: `v0.9 – Portable Inference Runtime & Model Export`
 
-> **Development Status:** `v0.8 (Active Milestone)`
-> TensorForge v0.8 introduces a robust **Model Serialization & Checkpointing Subsystem** (`tensorforge.serialization`) featuring safe `.tfmodel` and `.tfckpt` container formats. It enables full model state persistence, in-place parameter restoration preserving object identity, complete training checkpointing (model weights, optimizer states, epoch, step, and metrics), training resumption, and low-precision `QuantizedTensor` serialization without relying on `pickle` for model tensors.
+> **Development Status:** `v0.9 (Active Milestone)`
+> TensorForge v0.9 introduces a dedicated, high-performance **Portable Inference Runtime** (`tensorforge.inference.InferenceRuntime`) capable of loading serialized `.tfmodel` artifacts, automatically reconstructing network graphs, restoring FP32 and INT8 parameters, and executing predictions across NumPy and Native C++ acceleration backends without requiring the training or autograd stack.
 
 ---
 
 ## Project Overview
 
-TensorForge provides explicit control over memory representation, tensor operations, automatic differentiation, neural network composition, model training, and low-precision inference without relying on external deep learning runtimes (such as PyTorch, TensorFlow, or JAX).
+TensorForge provides explicit control over memory representation, tensor operations, automatic differentiation, neural network composition, model training, post-training quantization, and dedicated standalone inference execution.
 
-In **v0.8**, TensorForge features:
+In **v0.9**, TensorForge features:
 - Core multi-dimensional `Tensor` abstraction with contiguous physical storage.
 - Custom reverse-mode automatic differentiation DAG engine (`autograd`).
 - Neural network layers & activations (`Parameter`, `Module`, `Linear`, `ReLU`, `Sigmoid`, `Tanh`, `Softmax`, `MSELoss`, `CrossEntropyLoss`, `Sequential`).
@@ -31,102 +31,102 @@ In **v0.8**, TensorForge features:
   - Seamless Python autograd backpropagation across both native and NumPy forward computations.
 - **Quantization & INT8 Inference Subsystem (`tensorforge/quantization/`):**
   - **`QuantizedTensor`:** Low-precision data structure storing contiguous INT8 physical memory alongside linear scale and zero-point parameters.
-  - **Quantization Math:** Symmetric ($z=0$) and Asymmetric Affine quantization algorithms with numerical safety for constant and zero-range tensors.
+  - **Quantization Math:** Symmetric ($z=0$) and Asymmetric Affine quantization algorithms with numerical safety.
   - **Calibration Algorithms:** `MinMaxCalibrator`, `MovingAverageCalibrator`, and outlier-resistant `PercentileCalibrator`.
-  - **INT8 Compute Kernels:** `qmatmul` matrix multiplication with 32-bit integer accumulation to prevent overflow, accelerated in C++ and NumPy.
+  - **INT8 Compute Kernels:** `qmatmul` matrix multiplication with 32-bit integer accumulation to prevent overflow.
 - **Model Serialization & Checkpointing Subsystem (`tensorforge/serialization/`):**
-  - **`model.state_dict()` / `model.load_state_dict()`:** In-place physical parameter loading preserving `Parameter` object identity, `requires_grad`, and leaf status without creating autograd graph edges.
-  - **Safe Container Formats (`.tfmodel`, `.tfckpt`):** Structured ZIP archives containing JSON metadata and raw `.npy` binary arrays (**strictly avoiding `pickle`** for tensor buffers).
-  - **Optimizer State Persistence:** Complete serialization of momentum buffers (SGD), first/second raw moment estimates (Adam), and step counters.
-  - **Quantized Model Serialization:** Serialization and exact restoration of `QuantizedTensor` parameters (INT8 data, scale, zero_point, scheme, shape, dtype).
-  - **Model Size Inspection:** `compute_model_size` utility reporting parameter counts, byte footprints, and compression ratios.
+  - Safe `.tfmodel` and `.tfckpt` structured ZIP archives (**strictly avoiding `pickle`** for tensor storage).
+  - In-place physical parameter loading preserving `Parameter` object identity and `requires_grad`.
+  - Optimizer state persistence and training resumption.
+- **Portable Inference Runtime Subsystem (`tensorforge/inference/`):**
+  - **`InferenceRuntime`:** Standalone prediction engine operating in `eval` mode with strict `no_grad` guarantees (zero backward graph allocation).
+  - **`ModelLoader`:** Automated architecture reconstitution from serialized `.tfmodel` metadata.
+  - **Multi-Backend Execution:** Seamless execution on either NumPy reference or accelerated Native C++ kernels.
+  - **INT8 Low-Precision Inference:** Direct execution of quantized models with 4x memory savings.
 
 ---
 
-## Serialization & Checkpoint Architecture
+## Inference Runtime Architecture
 
 ```
-                          Neural Network / Module
-                                     │
-                     ┌───────────────┴───────────────┐
-                     ▼                               ▼
-            model.state_dict()            optimizer.state_dict()
-       (Named Parameters & Tensors)       (Moments, Buffers, Steps)
-                     │                               │
-                     └───────────────┬───────────────┘
-                                     │
-                                     ▼
-                      Serialization Engine & Formats
-                                     │
-                 ┌───────────────────┴───────────────────┐
-                 ▼                                       ▼
-        Model Archive (.tfmodel)               Training Checkpoint (.tfckpt)
-    ├── metadata.json (Version, Types)     ├── checkpoint.json (Epoch, Step, Loss)
-    └── tensors/<param_name>.npy           ├── model_tensors/<param_name>.npy
-                                           └── optim_tensors/<param_idx>_<key>.npy
-                                     │
-                                     ▼
-                         Safe Deserialization & Load
-                     (Direct in-place np.copyto into
-                      Parameter physical storage)
+                            Serialized Artifact (.tfmodel)
+                                          │
+                                          ▼
+                                     ModelLoader
+                           (Reconstructs Layer Graph &
+                            Loads FP32/INT8 Parameters)
+                                          │
+                                          ▼
+                                  InferenceRuntime
+                            ├── Model in eval() Mode
+                            ├── no_grad() Execution Context
+                            └── Backend Dispatcher Link
+                                          │
+                        ┌─────────────────┴─────────────────┐
+                        ▼                                   ▼
+                 NumPy Backend                      Native C++ Backend
+            (Universal CPU Reference)             (qmatmul / matmul C++ Kernels)
+                        │                                   │
+                        └─────────────────┬─────────────────┘
+                                          │
+                                          ▼
+                             Prediction Output Tensor
+                         (requires_grad=False, grad_fn=None)
 ```
 
 ---
 
-## Serialization Usage Examples
+## Inference Runtime Usage Examples
 
-### 1. Saving and Loading a Model
+### 1. Basic FP32 Inference
 
 ```python
 import tensorforge as tf
-import tensorforge.nn as nn
-from tensorforge.serialization import save_model, load_model
+from tensorforge.inference import InferenceRuntime
 
-# Construct and save model
-model = nn.Sequential(
-    nn.Linear(16, 32),
-    nn.ReLU(),
-    nn.Linear(32, 4),
-)
-save_model(model, "classifier.tfmodel", metadata={"task": "classification"})
+# 1. Load exported model artifact
+runtime = InferenceRuntime.load("classifier.tfmodel")
 
-# Instantiate fresh model and restore weights
-fresh_model = nn.Sequential(
-    nn.Linear(16, 32),
-    nn.ReLU(),
-    nn.Linear(32, 4),
-)
-load_model(fresh_model, "classifier.tfmodel")
+# 2. Inspect runtime summary
+print(runtime.summary())
+
+# 3. Execute prediction on sample or batch
+x = tf.randn((8, runtime.input_shape[0]))
+predictions = runtime.predict(x)
+
+print("Predictions shape:", predictions.shape)
+assert predictions.requires_grad is False
 ```
 
-### 2. Saving and Resuming Training Checkpoints
+### 2. Multi-Backend Inference Dispatch
 
 ```python
 import tensorforge as tf
-import tensorforge.nn as nn
-import tensorforge.optim as optim
-from tensorforge.serialization import save_checkpoint, load_checkpoint
+from tensorforge.backend import backend_context
+from tensorforge.inference import InferenceRuntime
 
-model = nn.Linear(8, 2)
-optimizer = optim.Adam(model.parameters(), lr=0.01)
+runtime = InferenceRuntime.load("classifier.tfmodel")
+x = tf.randn((16, runtime.input_shape[0]))
 
-# Save checkpoint
-save_checkpoint({
-    "model": model,
-    "optimizer": optimizer,
-    "epoch": 5,
-    "step": 250,
-    "loss": 0.042,
-}, "checkpoint.tfckpt")
+# Run with NumPy Backend
+with backend_context("numpy"):
+    out_np = runtime.predict(x)
 
-# Restore in a fresh training script
-fresh_model = nn.Linear(8, 2)
-fresh_optimizer = optim.Adam(fresh_model.parameters(), lr=0.01)
+# Run with Native C++ Fast Path (if available)
+with backend_context("native"):
+    out_native = runtime.predict(x)
+```
 
-checkpoint_data = load_checkpoint("checkpoint.tfckpt")
-fresh_model.load_state_dict(checkpoint_data["model_state_dict"])
-fresh_optimizer.load_state_dict(checkpoint_data["optimizer_state_dict"])
-start_epoch = checkpoint_data["epoch"]
+### 3. INT8 Quantized Model Inference
+
+```python
+from tensorforge.inference import InferenceRuntime
+
+# Load quantized model
+runtime_int8 = InferenceRuntime.load("quantized_classifier.tfmodel")
+
+print(f"Is Quantized: {runtime_int8.is_quantized}")
+output = runtime_int8.predict(x)
 ```
 
 ---
@@ -134,17 +134,17 @@ start_epoch = checkpoint_data["epoch"]
 ## Running Benchmarks & Demonstrations
 
 ```bash
-# Model serialization and checkpointing demonstration
+# Inference runtime demonstration
+python examples/inference_demo.py
+
+# Inference performance benchmark (Latency & Throughput)
+python benchmarks/benchmark_inference.py
+
+# Serialization demonstration
 python examples/serialization_demo.py
 
-# End-to-end post-training quantization and inference demo
+# Quantization demonstration
 python examples/quantization_demo.py
-
-# Quantization benchmark
-python benchmarks/benchmark_quantization.py
-
-# Multi-backend Matrix multiplication benchmark
-python benchmarks/benchmark_matmul.py
 ```
 
 ---
@@ -161,9 +161,12 @@ TensorForge/
 │       └── test_native.cpp          # Standalone C++ test suite
 │
 ├── tensorforge/
-│   ├── __init__.py                  # Top-level exports & version (0.8.0)
-│   ├── serialization/               # NEW: Model Serialization & Checkpointing Subsystem
-│   │   ├── __init__.py              # Public serialization exports
+│   ├── __init__.py                  # Top-level exports & version (0.9.0)
+│   ├── inference/                   # NEW: Portable Inference Runtime Subsystem
+│   │   ├── __init__.py              # Public inference exports (InferenceRuntime, ModelLoader)
+│   │   ├── runtime.py               # Standalone InferenceRuntime execution engine
+│   │   └── loader.py                # ModelLoader & dynamic architecture reconstitution
+│   ├── serialization/               # Model Serialization & Checkpointing Subsystem
 │   │   ├── format.py                # Safe structured ZIP container (.tfmodel, .tfckpt)
 │   │   └── checkpoint.py            # save_model, load_model, save_checkpoint, load_checkpoint
 │   ├── quantization/                # Quantization & INT8 Inference Subsystem
@@ -173,18 +176,21 @@ TensorForge/
 │   │   └── metrics.py               # MAE, Max Error, MSE, Relative Error, SQNR
 │   ├── backend/                     # Backend Dispatcher Subsystem
 │   ├── optim/                       # Optimizer subsystem (SGD, Adam with state_dict)
-│   ├── nn/                          # Neural Network subsystem (Module with state_dict, Linear, etc.)
+│   ├── nn/                          # Neural Network subsystem (Module, Linear, Sequential, etc.)
 │   ├── autograd/                    # Automatic Differentiation DAG engine
 │   ├── tensor/                      # Core Tensor subsystem
 │   └── utils/
-│       └── validation.py            # SerializationError, QuantizationError, ShapeError
+│       └── validation.py            # Custom exception hierarchy
 │
 ├── tests/                           # Python Test Suite
-│   ├── serialization/               # NEW: Serialization test suite
-│   │   ├── test_state_dict.py
-│   │   ├── test_serialization.py
-│   │   ├── test_checkpoint.py
-│   │   └── test_quantized_serialization.py
+│   ├── inference/                   # NEW: Inference runtime test suite
+│   │   ├── test_loader.py
+│   │   ├── test_runtime.py
+│   │   ├── test_fp32_inference.py
+│   │   ├── test_backend_dispatch.py
+│   │   ├── test_inference_no_grad.py
+│   │   └── test_quantized_inference.py
+│   ├── serialization/
 │   ├── quantization/
 │   ├── backend/
 │   ├── autograd/
@@ -192,9 +198,15 @@ TensorForge/
 │   └── optim/
 │
 ├── examples/                        # Demonstrations
-│   ├── serialization_demo.py        # NEW: Model serialization & training resume demo
+│   ├── inference_demo.py            # NEW: Standalone inference runtime demo
+│   ├── serialization_demo.py
 │   ├── quantization_demo.py
 │   └── training_demo.py
+│
+├── benchmarks/                      # Benchmarks
+│   ├── benchmark_inference.py       # NEW: Inference latency and throughput benchmark
+│   ├── benchmark_quantization.py
+│   └── benchmark_matmul.py
 │
 ├── README.md
 ├── pyproject.toml
@@ -214,5 +226,6 @@ TensorForge/
 | **v0.5 – Native Runtime & Performance Foundation** | **Complete** | C++17 runtime, CPU allocator, native storage, CPU kernels, benchmark suite |
 | **v0.6 – Native Operation Dispatch & Runtime Integration** | **Complete** | Backend dispatcher, runtime backend switching, automatic NumPy fallback, autograd integration |
 | **v0.7 – Quantization Runtime & INT8 Inference** | **Complete** | QuantizedTensor, symmetric & asymmetric INT8 quantization, calibration, INT8 matmul, error metrics |
-| **v0.8 – Model Serialization & Checkpointing** | **Current** | Safe .tfmodel & .tfckpt formats, state_dict, optimizer state persistence, training resumption |
-| **v0.9 – Production Inference Engine & Operator Fusion** | Planned | Graph execution engine, operator fusion (Linear+ReLU), batching queue, C/C++ embedding API |
+| **v0.8 – Model Serialization & Checkpointing** | **Complete** | Safe .tfmodel & .tfckpt formats, state_dict, optimizer state persistence, training resumption |
+| **v0.9 – Portable Inference Runtime & Model Export** | **Current** | Dedicated InferenceRuntime, ModelLoader, zero-code architecture reconstitution, multi-backend dispatch |
+| **v1.0 – Production Inference Engine & Operator Fusion** | Planned | Graph execution engine, operator fusion (Linear+ReLU), batching queue, C/C++ embedding API |
