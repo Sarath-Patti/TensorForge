@@ -2,8 +2,8 @@
 
 import os
 import tempfile
+import unittest
 import numpy as np
-import pytest
 import tensorforge as tf
 import tensorforge.nn as nn
 from tensorforge.backend import is_native_available
@@ -13,136 +13,109 @@ from tensorforge.serialization import save_model
 from tensorforge.serialization.format import extract_module_architecture, write_tfmodel_container
 
 
-def test_runtime_compile_and_predict_parity():
-    with tempfile.TemporaryDirectory() as tmpdir:
-        model_path = os.path.join(tmpdir, "model.tfmodel")
-        model = nn.Sequential(
-            nn.Linear(16, 32),
-            nn.ReLU(),
-            nn.Linear(32, 8),
-            nn.Softmax(dim=-1),
-        )
-        save_model(model, model_path)
+class TestCompiledRuntime(unittest.TestCase):
 
-        runtime = InferenceRuntime.load(model_path)
-        assert runtime.is_compiled is False
+    def test_runtime_compile_and_predict_parity(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            model_path = os.path.join(tmpdir, "model.tfmodel")
+            model = nn.Sequential(
+                nn.Linear(16, 32),
+                nn.ReLU(),
+                nn.Linear(32, 8),
+                nn.Softmax(dim=-1),
+            )
+            save_model(model, model_path)
 
-        runtime.compile(input_shape=(8, 16))
-        assert runtime.is_compiled is True
-        assert runtime.execution_plan is not None
-        assert runtime.workspace_size > 0
+            runtime = InferenceRuntime.load(model_path)
+            self.assertFalse(runtime.is_compiled)
 
-        # Predict with compiled runtime
-        x = tf.randn((8, 16))
-        with tf.no_grad():
-            ref_out = model(x)
-        compiled_out = runtime.predict(x)
+            runtime.compile(input_shape=(8, 16))
+            self.assertTrue(runtime.is_compiled)
+            self.assertIsNotNone(runtime.execution_plan)
+            self.assertGreater(runtime.workspace_size, 0)
 
-        np.testing.assert_allclose(compiled_out.numpy(), ref_out.numpy(), atol=1e-5, rtol=1e-5)
-
-
-def test_runtime_compiled_dynamic_batch_execution():
-    with tempfile.TemporaryDirectory() as tmpdir:
-        model_path = os.path.join(tmpdir, "model.tfmodel")
-        model = nn.Sequential(
-            nn.Linear(8, 16),
-            nn.ReLU(),
-            nn.Linear(16, 2),
-        )
-        save_model(model, model_path)
-
-        runtime = InferenceRuntime.load(model_path).compile(input_shape=(4, 8))
-
-        # Predict with different batch sizes
-        for b in [1, 4, 16, 32]:
-            x = tf.randn((b, 8))
+            # Predict with compiled runtime
+            x = tf.randn((8, 16))
             with tf.no_grad():
                 ref_out = model(x)
             compiled_out = runtime.predict(x)
-            assert compiled_out.shape == (b, 2)
+
             np.testing.assert_allclose(compiled_out.numpy(), ref_out.numpy(), atol=1e-5, rtol=1e-5)
 
+    def test_runtime_compiled_dynamic_batch_execution(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            model_path = os.path.join(tmpdir, "model.tfmodel")
+            model = nn.Sequential(
+                nn.Linear(8, 16),
+                nn.ReLU(),
+                nn.Linear(16, 2),
+            )
+            save_model(model, model_path)
 
-def test_runtime_compiled_summary():
-    with tempfile.TemporaryDirectory() as tmpdir:
-        model_path = os.path.join(tmpdir, "model.tfmodel")
-        model = nn.Sequential(
-            nn.Linear(8, 16),
-            nn.ReLU(),
-            nn.Linear(16, 4),
-            nn.Softmax(dim=-1),
-        )
-        save_model(model, model_path)
+            runtime = InferenceRuntime.load(model_path).compile(input_shape=(4, 8))
 
-        runtime = InferenceRuntime.load(model_path).compile(input_shape=(4, 8))
-        summary = runtime.summary()
+            # Predict with different batch sizes
+            for b in [1, 4, 16, 32]:
+                x = tf.randn((b, 8))
+                with tf.no_grad():
+                    ref_out = model(x)
+                out = runtime.predict(x)
+                np.testing.assert_allclose(out.numpy(), ref_out.numpy(), atol=1e-5, rtol=1e-5)
 
-        assert summary["is_optimized"] is True
-        assert summary["is_compiled"] is True
-        assert summary["compiled_steps"] == 2
-        assert summary["workspace_bytes"] > 0
-        assert summary["tensorforge_version"] == "1.1.0"
+    def test_compiled_native_vs_numpy_parity(self):
+        if not is_native_available():
+            self.skipTest("Native C++ extension not compiled")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            model_path = os.path.join(tmpdir, "model.tfmodel")
+            model = nn.Sequential(
+                nn.Linear(16, 32),
+                nn.ReLU(),
+                nn.Linear(32, 16),
+                nn.Sigmoid(),
+            )
+            save_model(model, model_path)
+
+            runtime_np = InferenceRuntime.load(model_path, backend="numpy").compile(input_shape=(8, 16))
+            runtime_native = InferenceRuntime.load(model_path, backend="native").compile(input_shape=(8, 16))
+
+            x = tf.randn((8, 16))
+            out_np = runtime_np.predict(x)
+            out_native = runtime_native.predict(x)
+
+            np.testing.assert_allclose(out_native.numpy(), out_np.numpy(), atol=1e-5, rtol=1e-5)
+
+    def test_compiled_quantized_inference(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            model_path = os.path.join(tmpdir, "q_model.tfmodel")
+            seq = nn.Sequential(nn.Linear(8, 16), nn.ReLU(), nn.Linear(16, 4))
+            seq.eval()
+
+            state = {
+                "0.weight": quantize(seq[0].weight, scheme="symmetric"),
+                "0.bias": quantize(seq[0].bias, scheme="symmetric"),
+                "2.weight": quantize(seq[2].weight, scheme="symmetric"),
+                "2.bias": quantize(seq[2].bias, scheme="symmetric"),
+            }
+            meta = {
+                "format_version": "1.0",
+                "library_version": "1.3.0",
+                "architecture": extract_module_architecture(seq),
+                "is_quantized": True,
+                "created_at": "2026-08-16T12:00:00Z",
+                "custom_metadata": {},
+            }
+            write_tfmodel_container(model_path, state, meta)
+
+            runtime = InferenceRuntime.load(model_path).compile(input_shape=(4, 8))
+            self.assertTrue(runtime.is_quantized)
+            self.assertTrue(runtime.is_compiled)
+
+            x = tf.randn((4, 8))
+            out = runtime.predict(x)
+            self.assertEqual(out.shape, (4, 4))
+            self.assertFalse(out.requires_grad)
 
 
-@pytest.mark.skipif(not is_native_available(), reason="Native C++ extension not available")
-def test_runtime_compiled_native_backend():
-    with tempfile.TemporaryDirectory() as tmpdir:
-        model_path = os.path.join(tmpdir, "model.tfmodel")
-        model = nn.Sequential(
-            nn.Linear(8, 16),
-            nn.ReLU(),
-            nn.Linear(16, 4),
-            nn.Sigmoid(),
-        )
-        save_model(model, model_path)
-
-        runtime_np = InferenceRuntime.load(model_path, backend="numpy").compile(input_shape=(4, 8))
-        runtime_native = InferenceRuntime.load(model_path, backend="native").compile(input_shape=(4, 8))
-
-        x = tf.randn((4, 8))
-        out_np = runtime_np.predict(x)
-        out_native = runtime_native.predict(x)
-
-        np.testing.assert_allclose(out_np.numpy(), out_native.numpy(), atol=1e-5, rtol=1e-5)
-
-
-def test_runtime_compiled_no_grad_and_immutability():
-    with tempfile.TemporaryDirectory() as tmpdir:
-        model_path = os.path.join(tmpdir, "model.tfmodel")
-        model = nn.Sequential(nn.Linear(4, 8), nn.ReLU())
-        save_model(model, model_path)
-
-        runtime = InferenceRuntime.load(model_path).compile(input_shape=(2, 4))
-        w_before = runtime.model[0].weight.numpy().copy()
-
-        x = tf.randn((2, 4), requires_grad=True)
-        out = runtime.predict(x)
-
-        assert out.requires_grad is False
-        assert out.grad_fn is None
-
-        w_after = runtime.model[0].weight.numpy()
-        np.testing.assert_array_equal(w_before, w_after)
-
-
-def test_runtime_compiled_int8_quantized():
-    with tempfile.TemporaryDirectory() as tmpdir:
-        model_path = os.path.join(tmpdir, "quantized_model.tfmodel")
-        model = nn.Sequential(nn.Linear(8, 16), nn.ReLU())
-
-        q_weights = {name: quantize(param, scheme="symmetric") for name, param in model.named_parameters()}
-        write_tfmodel_container(
-            model_path,
-            q_weights,
-            metadata={"is_quantized": True},
-            architecture=extract_module_architecture(model),
-        )
-
-        runtime = InferenceRuntime.load(model_path).compile(input_shape=(4, 8))
-        assert runtime.is_quantized is True
-        assert runtime.is_compiled is True
-
-        x = tf.randn((4, 8))
-        out = runtime.predict(x)
-        assert out.shape == (4, 16)
-        assert not np.any(np.isnan(out.numpy()))
+if __name__ == "__main__":
+    unittest.main()

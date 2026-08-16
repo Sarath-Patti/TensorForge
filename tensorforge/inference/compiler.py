@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from typing import Any, Dict, Optional, Tuple, Union
 import numpy as np
 
@@ -22,6 +23,7 @@ from tensorforge.backend.native_backend import (
     native_mul,
     native_sub,
 )
+from tensorforge.inference.context import ExecutionContext
 from tensorforge.inference.graph import InferenceGraph, InferenceNode
 from tensorforge.inference.memory import MemoryPlanner
 from tensorforge.inference.plan import ExecutionPlan, ExecutionStep
@@ -34,10 +36,11 @@ from tensorforge.tensor.tensor import Tensor
 
 
 class CompiledPlanCache:
-    """In-memory cache for compiled ExecutionPlan instances to prevent redundant compilation."""
+    """Thread-safe in-memory cache for compiled ExecutionPlan instances to prevent redundant compilation."""
 
     def __init__(self) -> None:
         self._cache: Dict[Tuple[Any, ...], ExecutionPlan] = {}
+        self._lock: threading.Lock = threading.Lock()
 
     def get(
         self,
@@ -49,7 +52,8 @@ class CompiledPlanCache:
         num_threads: int = 1,
     ) -> Optional[ExecutionPlan]:
         key = (graph_id, tuple(input_shape), dtype.name, backend, is_quantized, num_threads)
-        return self._cache.get(key)
+        with self._lock:
+            return self._cache.get(key)
 
     def put(
         self,
@@ -62,13 +66,16 @@ class CompiledPlanCache:
         num_threads: int = 1,
     ) -> None:
         key = (graph_id, tuple(input_shape), dtype.name, backend, is_quantized, num_threads)
-        self._cache[key] = plan
+        with self._lock:
+            self._cache[key] = plan
 
     def clear(self) -> None:
-        self._cache.clear()
+        with self._lock:
+            self._cache.clear()
 
     def __len__(self) -> int:
-        return len(self._cache)
+        with self._lock:
+            return len(self._cache)
 
 
 class InferenceCompiler:
@@ -255,20 +262,23 @@ class InferenceCompiler:
         cls,
         plan: ExecutionPlan,
         input_tensor: Tensor,
+        context: Optional[ExecutionContext] = None,
     ) -> Tensor:
-        """Execute a compiled ExecutionPlan on an incoming Tensor.
+        """Execute a compiled ExecutionPlan on an incoming Tensor using an isolated ExecutionContext.
 
-        Reuses planned memory slots to eliminate allocation overhead.
+        Reuses planned memory slots to eliminate allocation overhead while ensuring strict
+        concurrency isolation across threads.
 
         Args:
             plan: Pre-compiled ExecutionPlan.
             input_tensor: Input Tensor matching plan input shape.
+            context: Per-prediction ExecutionContext holding isolated workspace slots.
 
         Returns:
             Output Tensor resulting from executing all compiled steps.
         """
-        # Workspace memory slots (ping-pong slots 0 and 1)
-        slots: Dict[int, Tensor] = {}
+        # Workspace memory slots (isolated per-context or local dictionary)
+        slots: Dict[int, Tensor] = context.slots if context is not None else {}
 
         for step in plan.steps:
             # 1. Fetch Input Tensor

@@ -41,6 +41,18 @@ class SerializationError(TensorForgeError, ValueError):
     """Raised when model or checkpoint serialization, deserialization, or validation fails."""
 
 
+class RuntimeClosedError(TensorForgeError, RuntimeError):
+    """Raised when an operation is attempted on a closed InferenceRuntime."""
+
+
+class ExecutionContextError(TensorForgeError, RuntimeError):
+    """Raised when an execution context operation is invalid or unavailable."""
+
+
+class ConcurrencyError(TensorForgeError, RuntimeError):
+    """Raised when a concurrency violation or race condition occurs."""
+
+
 def validate_shape(shape: Any) -> Tuple[int, ...]:
     """Validate and normalize a shape specification.
 

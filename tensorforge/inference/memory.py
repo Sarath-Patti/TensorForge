@@ -55,7 +55,6 @@ class MemoryRegion:
     def can_accommodate(self, first_use: int, last_use: int) -> bool:
         """Check if an interval [first_use, last_use] does not overlap with any active interval in this region."""
         for start, end in self.intervals:
-            # Overlap occurs if start < last_use and first_use < end
             if not (end <= first_use or last_use <= start):
                 return False
         return True
@@ -188,13 +187,13 @@ class MemoryPlanner:
         # 1. Build Buffer Lifetimes
         # In a sequential pipeline:
         # Step i produces Buffer i.
-        # Buffer i is created at step i and consumed at step i + 1.
+        # Buffer i is created at step i and consumed through step i + 1.
         buffers: Dict[int, BufferLifetime] = {}
         for i, (_, out_shape) in enumerate(shape_flow):
             out_numel = math.prod(out_shape)
             out_bytes = int(out_numel * itemsize)
             first_use = i
-            last_use = i + 1
+            last_use = i + 2 if i + 1 < num_steps else i + 1
             buffers[i] = BufferLifetime(
                 buffer_id=i,
                 size_bytes=out_bytes,

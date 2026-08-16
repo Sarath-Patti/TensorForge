@@ -2,8 +2,9 @@
 
 import os
 import tempfile
+import unittest
 import numpy as np
-import pytest
+
 import tensorforge as tf
 import tensorforge.nn as nn
 from tensorforge.backend import is_native_available
@@ -12,70 +13,76 @@ from tensorforge.inference.memory import MemoryPlan
 from tensorforge.serialization import save_model
 
 
-def test_runtime_thread_configuration_and_summary():
-    with tempfile.TemporaryDirectory() as tmpdir:
-        model_path = os.path.join(tmpdir, "model.tfmodel")
-        model = nn.Sequential(
-            nn.Linear(16, 32),
-            nn.ReLU(),
-            nn.Linear(32, 4),
-            nn.Softmax(dim=-1),
-        )
-        save_model(model, model_path)
+class TestParallelRuntime(unittest.TestCase):
 
-        runtime = InferenceRuntime.load(model_path, num_threads=2)
-        assert runtime.num_threads == 2
+    def test_runtime_thread_configuration_and_summary(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            model_path = os.path.join(tmpdir, "model.tfmodel")
+            model = nn.Sequential(
+                nn.Linear(16, 32),
+                nn.ReLU(),
+                nn.Linear(32, 4),
+                nn.Softmax(dim=-1),
+            )
+            save_model(model, model_path)
 
-        runtime.set_num_threads(4)
-        assert runtime.num_threads == 4
+            runtime = InferenceRuntime.load(model_path, num_threads=2)
+            self.assertEqual(runtime.num_threads, 2)
 
-        runtime.compile(input_shape=(8, 16))
-        assert isinstance(runtime.memory_plan, MemoryPlan)
-        assert runtime.memory_plan.num_regions > 0
+            runtime.set_num_threads(4)
+            self.assertEqual(runtime.num_threads, 4)
 
-        summary = runtime.summary()
-        assert summary["num_threads"] == 4
-        assert summary["workspace_regions"] == runtime.memory_plan.num_regions
-        assert summary["reused_buffers"] == runtime.memory_plan.num_reused_buffers
-        assert summary["tensorforge_version"] == "1.2.0"
+            runtime.compile(input_shape=(8, 16))
+            self.assertIsInstance(runtime.memory_plan, MemoryPlan)
+            self.assertGreater(runtime.memory_plan.num_regions, 0)
+
+            summary = runtime.summary()
+            self.assertEqual(summary["num_threads"], 4)
+            self.assertEqual(summary["workspace_regions"], runtime.memory_plan.num_regions)
+            self.assertEqual(summary["reused_buffers"], runtime.memory_plan.num_reused_buffers)
+            self.assertEqual(summary["tensorforge_version"], "1.3.0")
+
+    def test_runtime_parallel_prediction_parity(self):
+        if not is_native_available():
+            self.skipTest("Native C++ extension not compiled")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            model_path = os.path.join(tmpdir, "model.tfmodel")
+            model = nn.Sequential(
+                nn.Linear(32, 64),
+                nn.ReLU(),
+                nn.Linear(64, 16),
+                nn.Softmax(dim=-1),
+            )
+            save_model(model, model_path)
+
+            runtime_st = InferenceRuntime.load(model_path, backend="native", num_threads=1).compile(input_shape=(32, 32))
+            runtime_mt = InferenceRuntime.load(model_path, backend="native", num_threads=4).compile(input_shape=(32, 32))
+
+            x = tf.randn((32, 32))
+            out_st = runtime_st.predict(x)
+            out_mt = runtime_mt.predict(x)
+
+            np.testing.assert_allclose(out_mt.numpy(), out_st.numpy(), atol=1e-5, rtol=1e-5)
+
+    def test_runtime_parallel_no_grad_and_immutability(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            model_path = os.path.join(tmpdir, "model.tfmodel")
+            model = nn.Sequential(nn.Linear(16, 32), nn.ReLU())
+            save_model(model, model_path)
+
+            runtime = InferenceRuntime.load(model_path).set_num_threads(4).compile(input_shape=(16, 16))
+            w_before = runtime.model[0].weight.numpy().copy()
+
+            x = tf.randn((16, 16), requires_grad=True)
+            out = runtime.predict(x)
+
+            self.assertFalse(out.requires_grad)
+            self.assertIsNone(out.grad_fn)
+
+            w_after = runtime.model[0].weight.numpy()
+            np.testing.assert_array_equal(w_before, w_after)
 
 
-@pytest.mark.skipif(not is_native_available(), reason="Native C++ extension not compiled")
-def test_runtime_parallel_prediction_parity():
-    with tempfile.TemporaryDirectory() as tmpdir:
-        model_path = os.path.join(tmpdir, "model.tfmodel")
-        model = nn.Sequential(
-            nn.Linear(32, 64),
-            nn.ReLU(),
-            nn.Linear(64, 16),
-            nn.Softmax(dim=-1),
-        )
-        save_model(model, model_path)
-
-        runtime_st = InferenceRuntime.load(model_path, backend="native", num_threads=1).compile(input_shape=(32, 32))
-        runtime_mt = InferenceRuntime.load(model_path, backend="native", num_threads=4).compile(input_shape=(32, 32))
-
-        x = tf.randn((32, 32))
-        out_st = runtime_st.predict(x)
-        out_mt = runtime_mt.predict(x)
-
-        np.testing.assert_allclose(out_mt.numpy(), out_st.numpy(), atol=1e-5, rtol=1e-5)
-
-
-def test_runtime_parallel_no_grad_and_immutability():
-    with tempfile.TemporaryDirectory() as tmpdir:
-        model_path = os.path.join(tmpdir, "model.tfmodel")
-        model = nn.Sequential(nn.Linear(16, 32), nn.ReLU())
-        save_model(model, model_path)
-
-        runtime = InferenceRuntime.load(model_path).set_num_threads(4).compile(input_shape=(16, 16))
-        w_before = runtime.model[0].weight.numpy().copy()
-
-        x = tf.randn((16, 16), requires_grad=True)
-        out = runtime.predict(x)
-
-        assert out.requires_grad is False
-        assert out.grad_fn is None
-
-        w_after = runtime.model[0].weight.numpy()
-        np.testing.assert_array_equal(w_before, w_after)
+if __name__ == "__main__":
+    unittest.main()

@@ -38,6 +38,7 @@ void ThreadPool::start_workers(size_t count) {
 }
 
 void ThreadPool::shutdown() {
+    std::lock_guard<std::mutex> pool_lock(pool_mutex_);
     stop_ = true;
     cv_task_.notify_all();
 
@@ -58,11 +59,37 @@ void ThreadPool::set_num_threads(size_t num_threads) {
     if (num_threads == 0) {
         throw std::invalid_argument("num_threads must be at least 1.");
     }
+    std::lock_guard<std::mutex> pool_lock(pool_mutex_);
     if (num_threads == num_threads_.load()) {
         return;
     }
-    shutdown();
-    start_workers(num_threads);
+    
+    // Stop existing workers
+    stop_ = true;
+    cv_task_.notify_all();
+    for (auto& worker : workers_) {
+        if (worker.joinable()) {
+            worker.join();
+        }
+    }
+    workers_.clear();
+
+    {
+        std::lock_guard<std::mutex> lock(queue_mutex_);
+        while (!tasks_.empty()) {
+            tasks_.pop();
+        }
+    }
+
+    // Start new workers
+    stop_ = false;
+    num_threads_ = num_threads;
+    size_t bg_threads = num_threads > 1 ? num_threads - 1 : 0;
+    workers_.reserve(bg_threads);
+
+    for (size_t i = 0; i < bg_threads; ++i) {
+        workers_.emplace_back(&ThreadPool::worker_loop, this);
+    }
 }
 
 size_t ThreadPool::num_threads() const noexcept {

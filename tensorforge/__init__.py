@@ -14,6 +14,8 @@ from tensorforge.backend.dispatcher import (
 from tensorforge.inference import (
     BufferLifetime,
     CompiledPlanCache,
+    ExecutionContext,
+    ExecutionContextPool,
     ExecutionPlan,
     ExecutionStep,
     GraphOptimizer,
@@ -96,17 +98,20 @@ from tensorforge.tensor.tensor import (
     zeros,
 )
 from tensorforge.utils.validation import (
+    ConcurrencyError,
     DimensionError,
     DTypeError,
+    ExecutionContextError,
     IndexError_,
     QuantizationError,
+    RuntimeClosedError,
     SerializationError,
     ShapeError,
     StorageError,
     TensorForgeError,
 )
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 
 __all__ = [
     "__version__",
@@ -129,7 +134,7 @@ __all__ = [
     "randn",
     "arange",
     "from_numpy",
-    # Inference Compiler, Memory Planning & Parallel Runtime
+    # Inference Compiler, Memory Planning & Concurrency
     "InferenceRuntime",
     "ModelLoader",
     "InferenceGraph",
@@ -139,6 +144,8 @@ __all__ = [
     "InferenceCompiler",
     "ExecutionPlan",
     "ExecutionStep",
+    "ExecutionContext",
+    "ExecutionContextPool",
     "MemoryPlanner",
     "MemoryPlan",
     "BufferLifetime",
@@ -220,4 +227,7 @@ __all__ = [
     "StorageError",
     "QuantizationError",
     "SerializationError",
+    "RuntimeClosedError",
+    "ExecutionContextError",
+    "ConcurrencyError",
 ]

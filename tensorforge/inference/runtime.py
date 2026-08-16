@@ -1,7 +1,8 @@
-"""Dedicated Production Inference Runtime with Ahead-of-Time Compilation and Parallel CPU Execution."""
+"""Dedicated Production Inference Runtime with Ahead-of-Time Compilation, Multi-Threaded Parallel Execution, and Thread-Safe Concurrency."""
 
 from __future__ import annotations
 
+import threading
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 import numpy as np
 
@@ -15,6 +16,7 @@ from tensorforge.backend.dispatcher import (
     set_num_threads as set_backend_num_threads,
 )
 from tensorforge.inference.compiler import InferenceCompiler
+from tensorforge.inference.context import ExecutionContext, ExecutionContextPool
 from tensorforge.inference.graph import InferenceGraph
 from tensorforge.inference.loader import ModelLoader
 from tensorforge.inference.memory import MemoryPlan
@@ -27,7 +29,7 @@ from tensorforge.quantization.quantize import qmatmul, quantize
 from tensorforge.quantization.quantized_tensor import QuantizedTensor
 from tensorforge.tensor.dtype import float32
 from tensorforge.tensor.tensor import Tensor
-from tensorforge.utils.validation import TensorForgeError
+from tensorforge.utils.validation import RuntimeClosedError, TensorForgeError
 
 try:
     import _tensorforge_native as _native
@@ -39,17 +41,21 @@ except ImportError:
 
 
 class InferenceRuntime:
-    """A production-grade inference runtime supporting Operator Fusion, Memory Planning, and Parallel CPU Execution.
+    """A thread-safe production-grade inference runtime supporting Operator Fusion, Memory Planning, and Parallel Concurrency.
 
     Loads serialized .tfmodel artifacts, reconstructs network graphs, supports graph-level
     operator fusion (Linear+ReLU, Linear+Sigmoid, Linear+Tanh, Linear+Softmax), compiles models
     into deterministic ExecutionPlans with memory region reuse, and executes forward predictions
-    with multi-threaded CPU parallel kernels and strict no_grad guarantees.
+    with multi-threaded CPU parallel kernels, strict no_grad guarantees, and per-prediction workspace isolation.
 
-    Thread-Safety Note:
-        A single InferenceRuntime instance maintains stateful execution structures and memory planning
-        descriptors. While weights are strictly immutable, concurrent predict() calls across multiple
-        threads on the same runtime instance should be synchronized or use dedicated runtime instances.
+    Concurrency Guarantees:
+        - Thread-Safe: Multiple Python threads may concurrently invoke `predict()` on the exact same
+          InferenceRuntime instance without race conditions or memory corruption.
+        - Workspace Isolation: Each prediction obtains a dedicated `ExecutionContext` from a thread-safe
+          pool, ensuring no intermediate activation buffers are shared across concurrent calls.
+        - Lock-Free Compute: Model parameters are immutable; predictions execute in parallel without
+          global execution serialization locks.
+        - Lifecycle Safety: Calling `predict()` on a closed runtime deterministically raises `RuntimeClosedError`.
 
     Args:
         model: Reconstructed Module instance in evaluation mode.
@@ -93,6 +99,16 @@ class InferenceRuntime:
         self._compiled_plan: Optional[ExecutionPlan] = None
         self._is_compiled: bool = False
         self._arena: Optional[Any] = None
+
+        # Thread-safe execution context pool & concurrency locks
+        self._context_pool: ExecutionContextPool = ExecutionContextPool()
+        self._lifecycle_lock: threading.Lock = threading.Lock()
+        self._compile_lock: threading.RLock = threading.RLock()
+        self._config_lock: threading.Lock = threading.Lock()
+        self._stats_lock: threading.Lock = threading.Lock()
+        self._is_closed: bool = False
+        self._prediction_count: int = 0
+        self._error_count: int = 0
 
         # Infer input and output dimensions
         self._input_shape: Optional[Tuple[int, ...]] = None
@@ -141,8 +157,41 @@ class InferenceRuntime:
             num_threads=num_threads,
         )
 
+    def __enter__(self) -> InferenceRuntime:
+        """Context manager support for deterministic runtime resource lifecycle."""
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        """Context manager exit releasing workspace resources."""
+        self.close()
+
+    def close(self) -> None:
+        """Close the runtime and release all pooled execution contexts and native arenas."""
+        with self._lifecycle_lock:
+            if self._is_closed:
+                return
+            self._is_closed = True
+            self._context_pool.clear()
+            if self._arena is not None:
+                if hasattr(self._arena, "reset"):
+                    self._arena.reset()
+                self._arena = None
+
+    @property
+    def is_closed(self) -> bool:
+        """Whether the runtime has been closed."""
+        with self._lifecycle_lock:
+            return self._is_closed
+
+    @property
+    def closed(self) -> bool:
+        """Alias for is_closed."""
+        return self.is_closed
+
     def set_num_threads(self, num_threads: int) -> InferenceRuntime:
         """Set the number of CPU threads used for parallel inference execution.
+
+        Thread-safe: Safely reconfigures thread counts and updates compiled execution plans.
 
         Args:
             num_threads: Number of worker threads (must be >= 1).
@@ -153,16 +202,22 @@ class InferenceRuntime:
         if not isinstance(num_threads, int) or num_threads < 1:
             raise TensorForgeError(f"num_threads must be an integer >= 1, got {num_threads}.")
 
-        self._num_threads = num_threads
-        set_backend_num_threads(num_threads)
+        with self._config_lock:
+            with self._lifecycle_lock:
+                if self._is_closed:
+                    raise RuntimeClosedError("Cannot configure threads on a closed InferenceRuntime.")
 
-        # If already compiled, invalidate plan so it recompiles with new thread configuration
-        if self._is_compiled and self._compiled_plan is not None:
-            self.compile(
-                input_shape=self._compiled_plan.input_shape,
-                backend=self._backend,
-                num_threads=num_threads,
-            )
+            self._num_threads = num_threads
+            set_backend_num_threads(num_threads)
+
+            # If already compiled, invalidate plan so it recompiles with new thread configuration
+            with self._compile_lock:
+                if self._is_compiled and self._compiled_plan is not None:
+                    self.compile(
+                        input_shape=self._compiled_plan.input_shape,
+                        backend=self._backend,
+                        num_threads=num_threads,
+                    )
 
         return self
 
@@ -180,8 +235,13 @@ class InferenceRuntime:
         Returns:
             Self (enables method chaining).
         """
-        self._optimized_graph, self._optimization_stats = GraphOptimizer.optimize(self._graph)
-        self._is_optimized = True
+        with self._compile_lock:
+            with self._lifecycle_lock:
+                if self._is_closed:
+                    raise RuntimeClosedError("Cannot optimize a closed InferenceRuntime.")
+
+            self._optimized_graph, self._optimization_stats = GraphOptimizer.optimize(self._graph)
+            self._is_optimized = True
         return self
 
     def compile(
@@ -202,34 +262,39 @@ class InferenceRuntime:
         Returns:
             Self (enables method chaining).
         """
-        if not self._is_optimized:
-            self.optimize()
+        with self._compile_lock:
+            with self._lifecycle_lock:
+                if self._is_closed:
+                    raise RuntimeClosedError("Cannot compile a closed InferenceRuntime.")
 
-        target_graph = self.graph
-        target_backend = backend if backend is not None else self.backend
-        target_threads = num_threads if num_threads is not None else self._num_threads
+            if not self._is_optimized:
+                self.optimize()
 
-        # Normalize 1D input shape to 2D (1, in_features) if necessary
-        normalized_shape = (1, input_shape[0]) if len(input_shape) == 1 else input_shape
+            target_graph = self.graph
+            target_backend = backend if backend is not None else self.backend
+            target_threads = num_threads if num_threads is not None else self._num_threads
 
-        self._compiled_plan = InferenceCompiler.compile(
-            graph=target_graph,
-            input_shape=normalized_shape,
-            backend=target_backend,
-            dtype=float32,
-            is_quantized=self._is_quantized,
-            num_threads=target_threads,
-            use_cache=use_cache,
-        )
+            # Normalize 1D input shape to 2D (1, in_features) if necessary
+            normalized_shape = (1, input_shape[0]) if len(input_shape) == 1 else input_shape
 
-        self._is_compiled = True
-        self._num_threads = target_threads
+            self._compiled_plan = InferenceCompiler.compile(
+                graph=target_graph,
+                input_shape=normalized_shape,
+                backend=target_backend,
+                dtype=float32,
+                is_quantized=self._is_quantized,
+                num_threads=target_threads,
+                use_cache=use_cache,
+            )
 
-        # Initialize native workspace arena if native runtime is available
-        if target_backend == "native" and _native is not None and hasattr(_native, "WorkspaceArena"):
-            ws_bytes = self._compiled_plan.total_workspace_bytes
-            if ws_bytes > 0:
-                self._arena = _native.WorkspaceArena(ws_bytes)
+            self._is_compiled = True
+            self._num_threads = target_threads
+
+            # Initialize native workspace arena if native runtime is available
+            if target_backend == "native" and _native is not None and hasattr(_native, "WorkspaceArena"):
+                ws_bytes = self._compiled_plan.total_workspace_bytes
+                if ws_bytes > 0:
+                    self._arena = _native.WorkspaceArena(ws_bytes)
 
         return self
 
@@ -317,11 +382,31 @@ class InferenceRuntime:
         """Inferred expected output feature shape."""
         return self._output_shape
 
+    @property
+    def prediction_count(self) -> int:
+        """Total number of successful predictions executed on this runtime."""
+        with self._stats_lock:
+            return self._prediction_count
+
+    @property
+    def error_count(self) -> int:
+        """Total number of prediction errors encountered on this runtime."""
+        with self._stats_lock:
+            return self._error_count
+
+    @property
+    def active_contexts(self) -> int:
+        """Number of execution contexts currently active in concurrent predict() calls."""
+        return self._context_pool.active_count
+
     def predict(
         self,
         input_data: Union[Tensor, np.ndarray, Sequence[Any]],
     ) -> Tensor:
         """Execute inference prediction on the given input sample or batch.
+
+        Thread-safe: Safe for simultaneous execution by multiple Python threads.
+        Each thread acquires an isolated ExecutionContext to guarantee workspace memory isolation.
 
         Guarantees that inference runs in `eval` mode with `no_grad` active,
         producing detached tensors with no autograd graph overhead.
@@ -331,7 +416,14 @@ class InferenceRuntime:
 
         Returns:
             Output Tensor representing prediction results.
+
+        Raises:
+            RuntimeClosedError: If invoked on a closed InferenceRuntime.
         """
+        with self._lifecycle_lock:
+            if self._is_closed:
+                raise RuntimeClosedError("Cannot execute predict(): InferenceRuntime has been closed.")
+
         if isinstance(input_data, Tensor):
             x = input_data
         elif isinstance(input_data, np.ndarray):
@@ -341,52 +433,62 @@ class InferenceRuntime:
 
         target_backend = self.backend
 
-        with backend_context(target_backend):
-            with no_grad():
-                # 1. Compiled Execution Path
-                if self._is_compiled and self._compiled_plan is not None:
-                    # Check shape compatibility
-                    if x.shape == self._compiled_plan.input_shape:
-                        output = InferenceCompiler.execute_plan(self._compiled_plan, x)
-                    elif len(x.shape) == len(self._compiled_plan.input_shape) and x.shape[1:] == self._compiled_plan.input_shape[1:]:
-                        # Dynamic batch size recompilation (cached automatically)
-                        plan = InferenceCompiler.compile(
-                            graph=self.graph,
-                            input_shape=x.shape,
-                            backend=target_backend,
-                            dtype=float32,
-                            is_quantized=self._is_quantized,
-                            num_threads=self._num_threads,
-                            use_cache=True,
-                        )
-                        output = InferenceCompiler.execute_plan(plan, x)
-                    else:
-                        # Fallback to eager optimized execution
-                        output = GraphOptimizer.execute(
-                            self.graph,
-                            x,
-                            backend=target_backend,
-                            is_quantized=self._is_quantized,
-                        )
+        try:
+            with self._context_pool.acquire() as ctx:
+                with backend_context(target_backend):
+                    with no_grad():
+                        # 1. Compiled Execution Path
+                        if self._is_compiled and self._compiled_plan is not None:
+                            # Check shape compatibility
+                            if x.shape == self._compiled_plan.input_shape:
+                                output = InferenceCompiler.execute_plan(self._compiled_plan, x, context=ctx)
+                            elif len(x.shape) == len(self._compiled_plan.input_shape) and x.shape[1:] == self._compiled_plan.input_shape[1:]:
+                                # Dynamic batch size recompilation (synchronized & cached)
+                                plan = InferenceCompiler.compile(
+                                    graph=self.graph,
+                                    input_shape=x.shape,
+                                    backend=target_backend,
+                                    dtype=float32,
+                                    is_quantized=self._is_quantized,
+                                    num_threads=self._num_threads,
+                                    use_cache=True,
+                                )
+                                output = InferenceCompiler.execute_plan(plan, x, context=ctx)
+                            else:
+                                # Fallback to eager optimized execution
+                                output = GraphOptimizer.execute(
+                                    self.graph,
+                                    x,
+                                    backend=target_backend,
+                                    is_quantized=self._is_quantized,
+                                )
 
-                # 2. Optimized Graph Path
-                elif self._is_optimized and self._optimized_graph is not None:
-                    output = GraphOptimizer.execute(
-                        self._optimized_graph,
-                        x,
-                        backend=target_backend,
-                        is_quantized=self._is_quantized,
-                    )
+                        # 2. Optimized Graph Path
+                        elif self._is_optimized and self._optimized_graph is not None:
+                            output = GraphOptimizer.execute(
+                                self._optimized_graph,
+                                x,
+                                backend=target_backend,
+                                is_quantized=self._is_quantized,
+                            )
 
-                # 3. Quantized Eager Fallback Path
-                elif self._is_quantized:
-                    output = self._predict_quantized(x)
+                        # 3. Quantized Eager Fallback Path
+                        elif self._is_quantized:
+                            output = self._predict_quantized(x)
 
-                # 4. Standard Eager Path
-                else:
-                    output = self._model(x)
+                        # 4. Standard Eager Path
+                        else:
+                            output = self._model(x)
 
-        return output.detach()
+            with self._stats_lock:
+                self._prediction_count += 1
+
+            return output.detach()
+
+        except Exception:
+            with self._stats_lock:
+                self._error_count += 1
+            raise
 
     def predict_batch(
         self,
@@ -437,6 +539,39 @@ class InferenceRuntime:
 
         return current
 
+    def health(self) -> Dict[str, Any]:
+        """Perform a lightweight operational health check on the inference runtime.
+
+        Returns:
+            Dictionary containing health status, concurrency metrics, and error rates.
+        """
+        is_cls = self.is_closed
+        return {
+            "status": "closed" if is_cls else "healthy",
+            "backend": self.backend,
+            "is_compiled": self._is_compiled,
+            "is_optimized": self._is_optimized,
+            "is_quantized": self._is_quantized,
+            "num_threads": self._num_threads,
+            "active_contexts": self._context_pool.active_count,
+            "pooled_contexts": self._context_pool.total_count,
+            "idle_contexts": self._context_pool.idle_count,
+            "prediction_count": self.prediction_count,
+            "error_count": self.error_count,
+        }
+
+    def stats(self) -> Dict[str, Any]:
+        """Generate an extended diagnostic and statistical report of runtime state."""
+        summary = self.summary()
+        summary.update({
+            "health": self.health(),
+            "active_contexts": self.active_contexts,
+            "pooled_contexts": self._context_pool.total_count,
+            "prediction_count": self.prediction_count,
+            "error_count": self.error_count,
+        })
+        return summary
+
     def summary(self) -> Dict[str, Any]:
         """Generate a diagnostic summary of the loaded model and runtime environment.
 
@@ -453,6 +588,7 @@ class InferenceRuntime:
         return {
             "model_type": type(self._model).__name__,
             "architecture": repr(self._model),
+            "status": "closed" if self.is_closed else "active",
             "is_quantized": self._is_quantized,
             "is_optimized": self._is_optimized,
             "is_compiled": self._is_compiled,
@@ -475,11 +611,13 @@ class InferenceRuntime:
             "total_bytes": size_stats["total_bytes"],
             "size_kb": size_stats["size_kb"],
             "format_version": self._metadata.get("format_version", "1.0"),
-            "tensorforge_version": "1.2.0",
+            "tensorforge_version": "1.3.0",
         }
 
     def __repr__(self) -> str:
         status_items = []
+        if self.is_closed:
+            status_items.append("CLOSED")
         if self._is_optimized:
             status_items.append(f"optimized ({self.fused_count} fused)")
         if self._is_compiled:

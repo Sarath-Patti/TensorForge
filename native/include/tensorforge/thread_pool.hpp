@@ -77,6 +77,7 @@ private:
     std::vector<std::thread> workers_;
     std::queue<std::function<void()>> tasks_;
     std::mutex queue_mutex_;
+    std::mutex pool_mutex_;
     std::condition_variable cv_task_;
     std::atomic<bool> stop_{false};
     std::atomic<size_t> num_threads_{0};

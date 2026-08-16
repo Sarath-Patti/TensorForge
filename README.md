@@ -4,10 +4,10 @@
 
 ---
 
-## Current Milestone: `v1.2 – Runtime Memory Optimization & Parallel CPU Execution`
+## Current Milestone: `v1.3 – Production Runtime Reliability & Concurrency`
 
-> **Development Status:** `v1.2 (Production Release)`
-> TensorForge v1.2 enhances the production inference runtime with general **Interval-Based Memory Lifetime Planning** and **Multi-Threaded Parallel CPU Execution** (`ThreadPool`, `MemoryPlan`, `MemoryRegion`). By analyzing intermediate buffer liveness intervals, the runtime packs transient activations into 64-byte aligned reusable memory regions. Concurrently, native C++ kernels leverage row-partitioned multi-threading across independent output slices with zero data races and dynamic thread configuration.
+> **Development Status:** `v1.3 (Production Release)`
+> TensorForge v1.3 delivers complete multi-threaded concurrency safety and production reliability for the inference runtime. Multiple Python threads can now execute `predict()` simultaneously against a single `InferenceRuntime` instance with zero data races, deterministic numerical outputs, per-prediction workspace memory isolation (`ExecutionContext`, `ExecutionContextPool`), RAII lifecycle management (`close()`, context-manager support), and lightweight operational diagnostics (`health()`, `stats()`).
 
 ---
 
@@ -39,76 +39,81 @@ Inference Compiler (InferenceCompiler, CompiledPlanCache)
   ├── Static Shape Propagation (ShapePropagator)
   ├── Interval Memory Planner & Region Reuse (MemoryPlanner, MemoryPlan)
   ├── Parallel Workload Evaluator & Thread Allocation (ExecutionStep)
-  └── Plan Cache
+  └── Thread-Safe Plan Cache
   │
   ▼
-Execution Plan IR (ExecutionPlan, MemoryRegions, Parallel Flags)
+Execution Plan IR (Immutable ExecutionPlan, MemoryRegions, Parallel Flags)
   │
   ▼
-Native C++ Parallel Runtime & Memory Arena (WorkspaceArena, ThreadPool, CPU Kernels)
+Thread-Safe Inference Runtime (InferenceRuntime, ContextPool, ThreadPool)
+  ├── Per-Prediction ExecutionContext & Workspace Isolation (ExecutionContext)
+  ├── Multi-Threaded Concurrent Serving (ThreadPoolExecutor-safe)
+  ├── Dynamic Thread Configuration (set_num_threads)
+  ├── Deterministic Lifecycle Management (close, context manager)
+  └── Operational Health & Diagnostics (health, stats)
 ```
 
 ---
 
 ## Key Features & Subsystems
 
-### 1. Interval Memory Lifetime Analysis (`tensorforge/inference/memory.py`)
-- **`BufferLifetime`:** Tracks creation (`first_use`) and final read (`last_use`) intervals for all intermediate activations.
-- **`MemoryRegion`:** Allocates contiguous, reusable physical memory regions packed with 64-byte SIMD alignment padding.
-- **`MemoryPlanner`:** Uses interval coloring to schedule buffers into non-overlapping regions, minimizing peak workspace consumption across general topologies.
+### 1. Per-Prediction Execution Context & Workspace Pool (`tensorforge/inference/context.py`)
+- **`ExecutionContext`:** Provides an isolated, per-prediction execution workspace and buffer slot manager. Intermediate activations are never shared between concurrent `predict()` calls.
+- **`ExecutionContextPool`:** Thread-safe object pool managing reusable contexts using a fast, synchronized LIFO queue, avoiding memory allocation churn during high-throughput multi-threaded serving.
 
-### 2. Multi-Threaded Parallel CPU Subsystem (`native/include/tensorforge/thread_pool.hpp`, `native/src/thread_pool.cpp`)
-- **`ThreadPool`:** Lightweight, header-backed C++17 thread pool creating reusable worker threads across predictions with clean RAII shutdown.
-- **Row-Level Output Partitioning:** Distributes $M$ output rows across worker threads for `matmul`, `fused_linear`, and activation fusions, ensuring each thread writes exclusively to independent memory addresses.
-- **Small Workload Fallback:** Workloads below `PARALLEL_WORKLOAD_THRESHOLD` ($< 8192$ operations or batch size $\le 1$) execute synchronously on the calling thread to eliminate synchronization overhead.
+### 2. Thread-Safe Concurrent Runtime (`tensorforge/inference/runtime.py`)
+- **Multi-Threaded Serving:** Multiple threads can invoke `runtime.predict()` simultaneously without data races or corruption.
+- **Immutable Weights:** Model parameters are strictly read-only and never duplicated or mutated during inference.
+- **Lock-Free Prediction Path:** Predictions run concurrently without global serialization locks.
 
-### 3. Thread Configuration APIs
-- Global configuration: `tensorforge.backend.set_num_threads(n)` / `tensorforge.backend.get_num_threads()`.
-- Runtime-level configuration: `runtime.set_num_threads(n)` / `runtime.num_threads`.
+### 3. Lifecycle & Resource Management
+- **Context Manager Support:**
+  ```python
+  with InferenceRuntime.load("model.tfmodel") as runtime:
+      predictions = runtime.predict(x)
+  # Automatically closed on exit
+  ```
+- **Explicit Lifecycle:** `runtime.close()`, `runtime.is_closed`, and `runtime.closed`.
+- **Fail-Safe Exceptions:** Attempting to predict on a closed runtime raises `RuntimeClosedError`.
 
-### 4. Thread-Safety Guarantees & Constraints
-- **Parameters:** Weight parameters are strictly immutable during inference, preventing race conditions on model weights.
-- **Instance Concurrency:** A single `InferenceRuntime` instance uses internal stateful planning descriptors and workspace memory slots. Concurrent predictions on the exact same `InferenceRuntime` instance should use separate runtime instances or be externally synchronized.
+### 4. Operational Health & Diagnostics
+- **`runtime.health()`:** Returns status (`"healthy"` / `"closed"`), active and pooled contexts, prediction count, error count, and thread configurations.
+- **`runtime.stats()`:** Returns extended memory, parameter, and execution metrics.
 
 ---
 
 ## Inference Runtime Usage Examples
 
-### 1. Compiling and Running Multi-Threaded Inference
+### 1. Concurrent Multi-Threaded Serving
 
 ```python
+from concurrent.futures import ThreadPoolExecutor
 import tensorforge as tf
 from tensorforge.inference import InferenceRuntime
 
-# 1. Load exported model artifact (.tfmodel)
-runtime = InferenceRuntime.load("classifier.tfmodel")
+# 1. Load runtime with context manager
+with InferenceRuntime.load("classifier.tfmodel") as runtime:
+    runtime.set_num_threads(4)
+    runtime.compile(input_shape=(16, 32))
 
-# 2. Configure 4 CPU worker threads and compile for batch size 32
-runtime.set_num_threads(4)
-runtime.compile(input_shape=(32, 16))
+    # 2. Dispatch concurrent predictions from multiple worker threads
+    batches = [tf.randn((16, 32)) for _ in range(20)]
 
-# 3. Inspect runtime and memory plan
-summary = runtime.summary()
-print(f"Active Backend:      {summary['backend']}")
-print(f"Configured Threads:  {summary['num_threads']}")
-print(f"Workspace Memory:    {summary['workspace_bytes']} bytes")
-print(f"Memory Regions:      {summary['workspace_regions']}")
-print(f"Reused Buffers:      {summary['reused_buffers']}")
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        results = list(executor.map(runtime.predict, batches))
 
-# 4. Predict with multi-threaded parallel execution
-x = tf.randn((32, 16))
-predictions = runtime.predict(x)
-
-assert predictions.requires_grad is False
-assert predictions.grad_fn is None
+    # 3. Inspect runtime health and metrics
+    print("Runtime Health:", runtime.health())
 ```
 
-### 2. Inspecting Reusable Memory Regions
+### 2. Inspecting Memory and Concurrency Diagnostics
 
 ```python
-mem_plan = runtime.memory_plan
-for r_id, region in mem_plan.regions.items():
-    print(f"Region {r_id}: Capacity={region.size_bytes}B, Offset={region.offset_bytes}B, Buffers={region.assigned_buffers}")
+stats = runtime.stats()
+print(f"Total Predictions: {stats['prediction_count']}")
+print(f"Active Contexts:   {stats['active_contexts']}")
+print(f"Pooled Contexts:   {stats['pooled_contexts']}")
+print(f"Workspace Memory:  {stats['workspace_bytes']} bytes")
 ```
 
 ---
@@ -116,10 +121,13 @@ for r_id, region in mem_plan.regions.items():
 ## Running Benchmarks & Demonstrations
 
 ```bash
-# Parallel multi-threaded inference demonstration
-python examples/parallel_inference_demo.py
+# Concurrent multi-threaded inference demonstration
+python examples/concurrent_inference_demo.py
 
-# Multi-thread scaling performance benchmark (1, 2, 4, 8 threads)
+# Multi-worker concurrency and throughput benchmark
+python benchmarks/concurrent_inference.py
+
+# Multi-thread scaling benchmark (1, 2, 4, 8 native threads)
 python benchmarks/benchmark_inference.py
 
 # Compiled inference demonstration
@@ -146,7 +154,7 @@ TensorForge/
 │   ├── include/tensorforge/         # Public C++ headers
 │   │   ├── allocator.hpp            # 64-byte aligned CPU allocator
 │   │   ├── arena.hpp                # 64-byte aligned workspace arena
-│   │   ├── thread_pool.hpp          # NEW: C++17 inference ThreadPool
+│   │   ├── thread_pool.hpp          # C++17 inference ThreadPool
 │   │   ├── dtype.hpp                # DType enum & traits
 │   │   ├── kernels.hpp              # Parallel CPU compute kernels
 │   │   ├── shape.hpp                # Shape & contiguous stride math
@@ -155,8 +163,8 @@ TensorForge/
 │   ├── src/                         # Native implementations & pybind11 bindings
 │   │   ├── allocator.cpp
 │   │   ├── arena.cpp                # WorkspaceArena implementation
-│   │   ├── thread_pool.cpp          # NEW: ThreadPool implementation
-│   │   ├── bindings.cpp             # pybind11 module bindings (thread controls)
+│   │   ├── thread_pool.cpp          # ThreadPool implementation & synchronization
+│   │   ├── bindings.cpp             # pybind11 module bindings
 │   │   ├── dtype.cpp
 │   │   ├── kernels.cpp              # Multi-threaded parallel compute kernels
 │   │   ├── shape.cpp
@@ -166,17 +174,18 @@ TensorForge/
 │       └── test_native.cpp          # Standalone C++ test suite
 │
 ├── tensorforge/
-│   ├── __init__.py                  # Top-level exports & version (1.2.0)
-│   ├── inference/                   # Production Inference, Compiler & Parallel Subsystem
+│   ├── __init__.py                  # Top-level exports & version (1.3.0)
+│   ├── inference/                   # Production Inference, Compiler & Concurrency Subsystem
 │   │   ├── __init__.py              # Public inference exports
-│   │   ├── compiler.py              # InferenceCompiler & CompiledPlanCache
-│   │   ├── plan.py                  # ExecutionPlan & ExecutionStep IR (parallel flags)
+│   │   ├── context.py               # NEW: ExecutionContext & ExecutionContextPool
+│   │   ├── compiler.py              # InferenceCompiler & thread-safe CompiledPlanCache
+│   │   ├── plan.py                  # Immutable ExecutionPlan & ExecutionStep IR
 │   │   ├── shapes.py                # Static ShapePropagator engine
 │   │   ├── memory.py                # Interval-based MemoryPlanner & MemoryPlan
 │   │   ├── graph.py                 # InferenceGraph and InferenceNode representations
 │   │   ├── fusion.py                # OperatorFusionPass pattern matching engine
 │   │   ├── optimizer.py             # GraphOptimizer execution dispatcher
-│   │   ├── runtime.py               # InferenceRuntime (thread controls & memory plan)
+│   │   ├── runtime.py               # InferenceRuntime (thread-safe predict, lifecycle, health)
 │   │   └── loader.py                # ModelLoader & architecture reconstitution
 │   ├── serialization/               # Model Serialization Subsystem (.tfmodel, .tfckpt)
 │   ├── quantization/                # Quantization Subsystem (INT8, Calibration, qmatmul)
@@ -188,11 +197,13 @@ TensorForge/
 │   └── utils/                       # Validation & Exception hierarchy
 │
 ├── tests/                           # Python Test Suite
-│   ├── inference/                   # Inference & Parallel test suite
-│   │   ├── test_memory_lifetime.py  # NEW: Interval liveness & memory region tests
-│   │   ├── test_thread_pool.py      # NEW: CPU thread pool configuration tests
-│   │   ├── test_parallel_kernels.py # NEW: Parallel kernel numerical parity tests
-│   │   ├── test_parallel_runtime.py # NEW: Multi-threaded runtime & immutability tests
+│   ├── inference/                   # Inference, Concurrency & Lifecycle test suite
+│   │   ├── test_concurrency.py      # NEW: Concurrent multi-threaded prediction tests
+│   │   ├── test_runtime_lifecycle.py# NEW: Lifecycle, close(), health(), and stats() tests
+│   │   ├── test_memory_lifetime.py
+│   │   ├── test_thread_pool.py
+│   │   ├── test_parallel_kernels.py
+│   │   ├── test_parallel_runtime.py
 │   │   ├── test_compiler.py
 │   │   ├── test_shapes.py
 │   │   ├── test_memory_planner.py
@@ -214,7 +225,8 @@ TensorForge/
 │   └── optim/
 │
 ├── examples/                        # Demonstrations
-│   ├── parallel_inference_demo.py   # NEW: Parallel CPU execution & memory plan demo
+│   ├── concurrent_inference_demo.py # NEW: Multi-worker concurrent inference demo
+│   ├── parallel_inference_demo.py
 │   ├── compiled_inference_demo.py
 │   ├── inference_demo.py
 │   ├── serialization_demo.py
@@ -222,7 +234,8 @@ TensorForge/
 │   └── training_demo.py
 │
 ├── benchmarks/                      # Performance Benchmarks
-│   ├── benchmark_inference.py       # Thread scaling & backend comparative benchmark
+│   ├── concurrent_inference.py      # NEW: Multi-worker concurrency benchmark
+│   ├── benchmark_inference.py
 │   ├── benchmark_quantization.py
 │   └── benchmark_matmul.py
 │
@@ -249,3 +262,4 @@ TensorForge/
 | **v1.0 – Production Inference Engine & Operator Fusion** | **Complete** | InferenceGraph, OperatorFusionPass, native fused C++ kernels, multi-backend fallback, production release |
 | **v1.1 – Inference Compiler & Execution Planning** | **Complete** | InferenceCompiler, ExecutionPlan IR, static shape propagation, memory planner, native arena, plan caching |
 | **v1.2 – Runtime Memory Optimization & Parallel CPU Execution** | **Complete** | Interval memory planner, MemoryRegions, native ThreadPool, parallel CPU kernels, thread scaling |
+| **v1.3 – Production Runtime Reliability & Concurrency** | **Complete** | Thread-safe InferenceRuntime, ExecutionContext pool, workspace isolation, lifecycle APIs, diagnostics |
