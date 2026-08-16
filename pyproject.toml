@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tensorforge"
-version = "1.1.0"
+version = "1.2.0"
 description = "A memory-aware deep learning framework and inference engine."
 readme = "README.md"
 requires-python = ">=3.11"

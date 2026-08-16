@@ -1,4 +1,5 @@
 #include "tensorforge/kernels.hpp"
+#include "tensorforge/thread_pool.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -109,6 +110,18 @@ void mul(const Tensor& a, const Tensor& b, Tensor& out) {
     }
 }
 
+void div(const Tensor& a, const Tensor& b, Tensor& out) {
+    validate_elementwise_float32(a, b, out, "div");
+    const float* a_ptr = a.data_ptr<float>();
+    const float* b_ptr = b.data_ptr<float>();
+    float* out_ptr = out.data_ptr<float>();
+    const int64_t n = a.numel();
+
+    for (int64_t i = 0; i < n; ++i) {
+        out_ptr[i] = a_ptr[i] / b_ptr[i];
+    }
+}
+
 void add_scalar(const Tensor& a, float scalar, Tensor& out) {
     validate_scalar_float32(a, out, "add_scalar");
     const float* a_ptr = a.data_ptr<float>();
@@ -129,6 +142,60 @@ void mul_scalar(const Tensor& a, float scalar, Tensor& out) {
     for (int64_t i = 0; i < n; ++i) {
         out_ptr[i] = a_ptr[i] * scalar;
     }
+}
+
+void relu(const Tensor& a, Tensor& out) {
+    validate_scalar_float32(a, out, "relu");
+    const float* a_ptr = a.data_ptr<float>();
+    float* out_ptr = out.data_ptr<float>();
+    const int64_t n = a.numel();
+
+    for (int64_t i = 0; i < n; ++i) {
+        out_ptr[i] = a_ptr[i] > 0.0f ? a_ptr[i] : 0.0f;
+    }
+}
+
+void exp(const Tensor& a, Tensor& out) {
+    validate_scalar_float32(a, out, "exp");
+    const float* a_ptr = a.data_ptr<float>();
+    float* out_ptr = out.data_ptr<float>();
+    const int64_t n = a.numel();
+
+    for (int64_t i = 0; i < n; ++i) {
+        out_ptr[i] = std::exp(a_ptr[i]);
+    }
+}
+
+void log(const Tensor& a, Tensor& out) {
+    validate_scalar_float32(a, out, "log");
+    const float* a_ptr = a.data_ptr<float>();
+    float* out_ptr = out.data_ptr<float>();
+    const int64_t n = a.numel();
+
+    for (int64_t i = 0; i < n; ++i) {
+        out_ptr[i] = std::log(a_ptr[i]);
+    }
+}
+
+void sum(const Tensor& a, Tensor& out, int64_t dim, bool keepdim) {
+    if (a.dtype() != DType::Float32 || out.dtype() != DType::Float32) {
+        throw std::invalid_argument("sum currently supports Float32 dtype only");
+    }
+
+    const float* a_ptr = a.data_ptr<float>();
+    float* out_ptr = out.data_ptr<float>();
+
+    if (dim == -1 && !keepdim && out.numel() == 1) {
+        float total = 0.0f;
+        const int64_t n = a.numel();
+        for (int64_t i = 0; i < n; ++i) {
+            total += a_ptr[i];
+        }
+        out_ptr[0] = total;
+        return;
+    }
+
+    throw std::invalid_argument("Arbitrary axis sum reduction is not yet implemented in native kernel");
 }
 
 void matmul(const Tensor& a, const Tensor& b, Tensor& out) {
@@ -160,20 +227,27 @@ void matmul(const Tensor& a, const Tensor& b, Tensor& out) {
     const float* B = b.data_ptr<float>();
     float* C = out.data_ptr<float>();
 
-    // Zero-initialize output buffer
-    std::memset(C, 0, static_cast<size_t>(M * N) * sizeof(float));
+    auto compute_row_range = [&](size_t r_start, size_t r_end) {
+        for (size_t i = r_start; i < r_end; ++i) {
+            float* c_row = C + i * N;
+            std::memset(c_row, 0, N * sizeof(float));
+            const float* a_row = A + i * K;
 
-    // Cache-aware loop ordering (i, k, j) for optimal spatial locality on rows of B and C
-    for (int64_t i = 0; i < M; ++i) {
-        const float* a_row = A + i * K;
-        float* c_row = C + i * N;
-        for (int64_t k = 0; k < K; ++k) {
-            const float a_val = a_row[k];
-            const float* b_row = B + k * N;
-            for (int64_t j = 0; j < N; ++j) {
-                c_row[j] += a_val * b_row[j];
+            for (int64_t k = 0; k < K; ++k) {
+                const float a_ik = a_row[k];
+                const float* b_row = B + k * N;
+                for (int64_t j = 0; j < N; ++j) {
+                    c_row[j] += a_ik * b_row[j];
+                }
             }
         }
+    };
+
+    size_t total_work = static_cast<size_t>(M) * N * K;
+    if (total_work >= PARALLEL_WORKLOAD_THRESHOLD && M > 1) {
+        get_global_thread_pool().parallel_for(0, static_cast<size_t>(M), compute_row_range);
+    } else {
+        compute_row_range(0, static_cast<size_t>(M));
     }
 }
 
@@ -204,10 +278,7 @@ void qmatmul_int8(
                                     std::to_string(N) + ")");
     }
     if (out.shape()[0] != M || out.shape()[1] != N) {
-        throw std::invalid_argument("qmatmul_int8 output shape mismatch: expected (" + std::to_string(M) +
-                                    ", " + std::to_string(N) + "), got (" +
-                                    std::to_string(out.shape()[0]) + ", " +
-                                    std::to_string(out.shape()[1]) + ")");
+        throw std::invalid_argument("qmatmul_int8 output shape mismatch");
     }
 
     const int8_t* A = a.data_ptr<int8_t>();
@@ -215,25 +286,34 @@ void qmatmul_int8(
     float* C = out.data_ptr<float>();
 
     const float combined_scale = scale_a * scale_b;
-    std::vector<int32_t> row_acc(static_cast<size_t>(N), 0);
 
-    for (int64_t i = 0; i < M; ++i) {
-        std::fill(row_acc.begin(), row_acc.end(), 0);
-        const int8_t* a_row = A + i * K;
-        float* c_row = C + i * N;
+    auto compute_row_range = [&](size_t r_start, size_t r_end) {
+        std::vector<int32_t> row_acc(static_cast<size_t>(N), 0);
+        for (size_t i = r_start; i < r_end; ++i) {
+            std::fill(row_acc.begin(), row_acc.end(), 0);
+            const int8_t* a_row = A + i * K;
+            float* c_row = C + i * N;
 
-        for (int64_t k = 0; k < K; ++k) {
-            const int32_t a_val = static_cast<int32_t>(a_row[k]) - zp_a;
-            const int8_t* b_row = B + k * N;
+            for (int64_t k = 0; k < K; ++k) {
+                const int32_t a_val = static_cast<int32_t>(a_row[k]) - zp_a;
+                const int8_t* b_row = B + k * N;
+                for (int64_t j = 0; j < N; ++j) {
+                    const int32_t b_val = static_cast<int32_t>(b_row[j]) - zp_b;
+                    row_acc[static_cast<size_t>(j)] += a_val * b_val;
+                }
+            }
+
             for (int64_t j = 0; j < N; ++j) {
-                const int32_t b_val = static_cast<int32_t>(b_row[j]) - zp_b;
-                row_acc[static_cast<size_t>(j)] += a_val * b_val;
+                c_row[j] = static_cast<float>(row_acc[static_cast<size_t>(j)]) * combined_scale;
             }
         }
+    };
 
-        for (int64_t j = 0; j < N; ++j) {
-            c_row[j] = static_cast<float>(row_acc[static_cast<size_t>(j)]) * combined_scale;
-        }
+    size_t total_work = static_cast<size_t>(M) * N * K;
+    if (total_work >= PARALLEL_WORKLOAD_THRESHOLD && M > 1) {
+        get_global_thread_pool().parallel_for(0, static_cast<size_t>(M), compute_row_range);
+    } else {
+        compute_row_range(0, static_cast<size_t>(M));
     }
 }
 
@@ -280,7 +360,7 @@ void quantize_float32(const Tensor& in, Tensor& out, float scale, int32_t zero_p
 }
 
 // ============================================================================
-// TensorForge v1.0: Fused Forward Implementations
+// TensorForge: Fused Forward Implementations with Parallel CPU Execution
 // ============================================================================
 
 void fused_linear(
@@ -300,18 +380,27 @@ void fused_linear(
     const float* B = (bias != nullptr && bias->numel() > 0) ? bias->data_ptr<float>() : nullptr;
     float* OUT = out.data_ptr<float>();
 
-    for (int64_t i = 0; i < M; ++i) {
-        const float* x_row = X + i * K;
-        float* out_row = OUT + i * N;
+    auto compute_row_range = [&](size_t r_start, size_t r_end) {
+        for (size_t i = r_start; i < r_end; ++i) {
+            const float* x_row = X + i * K;
+            float* out_row = OUT + i * N;
 
-        for (int64_t j = 0; j < N; ++j) {
-            float acc = (B != nullptr) ? B[j] : 0.0f;
-            const float* w_row = W + j * K;
-            for (int64_t k = 0; k < K; ++k) {
-                acc += x_row[k] * w_row[k];
+            for (int64_t j = 0; j < N; ++j) {
+                float acc = (B != nullptr) ? B[j] : 0.0f;
+                const float* w_row = W + j * K;
+                for (int64_t k = 0; k < K; ++k) {
+                    acc += x_row[k] * w_row[k];
+                }
+                out_row[j] = acc;
             }
-            out_row[j] = acc;
         }
+    };
+
+    size_t total_work = static_cast<size_t>(M) * N * K;
+    if (total_work >= PARALLEL_WORKLOAD_THRESHOLD && M > 1) {
+        get_global_thread_pool().parallel_for(0, static_cast<size_t>(M), compute_row_range);
+    } else {
+        compute_row_range(0, static_cast<size_t>(M));
     }
 }
 
@@ -332,18 +421,27 @@ void fused_linear_relu(
     const float* B = (bias != nullptr && bias->numel() > 0) ? bias->data_ptr<float>() : nullptr;
     float* OUT = out.data_ptr<float>();
 
-    for (int64_t i = 0; i < M; ++i) {
-        const float* x_row = X + i * K;
-        float* out_row = OUT + i * N;
+    auto compute_row_range = [&](size_t r_start, size_t r_end) {
+        for (size_t i = r_start; i < r_end; ++i) {
+            const float* x_row = X + i * K;
+            float* out_row = OUT + i * N;
 
-        for (int64_t j = 0; j < N; ++j) {
-            float acc = (B != nullptr) ? B[j] : 0.0f;
-            const float* w_row = W + j * K;
-            for (int64_t k = 0; k < K; ++k) {
-                acc += x_row[k] * w_row[k];
+            for (int64_t j = 0; j < N; ++j) {
+                float acc = (B != nullptr) ? B[j] : 0.0f;
+                const float* w_row = W + j * K;
+                for (int64_t k = 0; k < K; ++k) {
+                    acc += x_row[k] * w_row[k];
+                }
+                out_row[j] = std::max(0.0f, acc);
             }
-            out_row[j] = std::max(0.0f, acc);
         }
+    };
+
+    size_t total_work = static_cast<size_t>(M) * N * K;
+    if (total_work >= PARALLEL_WORKLOAD_THRESHOLD && M > 1) {
+        get_global_thread_pool().parallel_for(0, static_cast<size_t>(M), compute_row_range);
+    } else {
+        compute_row_range(0, static_cast<size_t>(M));
     }
 }
 
@@ -364,18 +462,27 @@ void fused_linear_sigmoid(
     const float* B = (bias != nullptr && bias->numel() > 0) ? bias->data_ptr<float>() : nullptr;
     float* OUT = out.data_ptr<float>();
 
-    for (int64_t i = 0; i < M; ++i) {
-        const float* x_row = X + i * K;
-        float* out_row = OUT + i * N;
+    auto compute_row_range = [&](size_t r_start, size_t r_end) {
+        for (size_t i = r_start; i < r_end; ++i) {
+            const float* x_row = X + i * K;
+            float* out_row = OUT + i * N;
 
-        for (int64_t j = 0; j < N; ++j) {
-            float acc = (B != nullptr) ? B[j] : 0.0f;
-            const float* w_row = W + j * K;
-            for (int64_t k = 0; k < K; ++k) {
-                acc += x_row[k] * w_row[k];
+            for (int64_t j = 0; j < N; ++j) {
+                float acc = (B != nullptr) ? B[j] : 0.0f;
+                const float* w_row = W + j * K;
+                for (int64_t k = 0; k < K; ++k) {
+                    acc += x_row[k] * w_row[k];
+                }
+                out_row[j] = 1.0f / (1.0f + std::exp(-acc));
             }
-            out_row[j] = 1.0f / (1.0f + std::exp(-acc));
         }
+    };
+
+    size_t total_work = static_cast<size_t>(M) * N * K;
+    if (total_work >= PARALLEL_WORKLOAD_THRESHOLD && M > 1) {
+        get_global_thread_pool().parallel_for(0, static_cast<size_t>(M), compute_row_range);
+    } else {
+        compute_row_range(0, static_cast<size_t>(M));
     }
 }
 
@@ -396,18 +503,27 @@ void fused_linear_tanh(
     const float* B = (bias != nullptr && bias->numel() > 0) ? bias->data_ptr<float>() : nullptr;
     float* OUT = out.data_ptr<float>();
 
-    for (int64_t i = 0; i < M; ++i) {
-        const float* x_row = X + i * K;
-        float* out_row = OUT + i * N;
+    auto compute_row_range = [&](size_t r_start, size_t r_end) {
+        for (size_t i = r_start; i < r_end; ++i) {
+            const float* x_row = X + i * K;
+            float* out_row = OUT + i * N;
 
-        for (int64_t j = 0; j < N; ++j) {
-            float acc = (B != nullptr) ? B[j] : 0.0f;
-            const float* w_row = W + j * K;
-            for (int64_t k = 0; k < K; ++k) {
-                acc += x_row[k] * w_row[k];
+            for (int64_t j = 0; j < N; ++j) {
+                float acc = (B != nullptr) ? B[j] : 0.0f;
+                const float* w_row = W + j * K;
+                for (int64_t k = 0; k < K; ++k) {
+                    acc += x_row[k] * w_row[k];
+                }
+                out_row[j] = std::tanh(acc);
             }
-            out_row[j] = std::tanh(acc);
         }
+    };
+
+    size_t total_work = static_cast<size_t>(M) * N * K;
+    if (total_work >= PARALLEL_WORKLOAD_THRESHOLD && M > 1) {
+        get_global_thread_pool().parallel_for(0, static_cast<size_t>(M), compute_row_range);
+    } else {
+        compute_row_range(0, static_cast<size_t>(M));
     }
 }
 
@@ -429,37 +545,46 @@ void fused_linear_softmax(
     const float* B = (bias != nullptr && bias->numel() > 0) ? bias->data_ptr<float>() : nullptr;
     float* OUT = out.data_ptr<float>();
 
-    for (int64_t i = 0; i < M; ++i) {
-        const float* x_row = X + i * K;
-        float* out_row = OUT + i * N;
+    auto compute_row_range = [&](size_t r_start, size_t r_end) {
+        for (size_t i = r_start; i < r_end; ++i) {
+            const float* x_row = X + i * K;
+            float* out_row = OUT + i * N;
 
-        // 1. Matrix multiplication + bias accumulation
-        float max_val = -1e30f;
-        for (int64_t j = 0; j < N; ++j) {
-            float acc = (B != nullptr) ? B[j] : 0.0f;
-            const float* w_row = W + j * K;
-            for (int64_t k = 0; k < K; ++k) {
-                acc += x_row[k] * w_row[k];
+            // 1. Matrix multiplication + bias accumulation
+            float max_val = -1e30f;
+            for (int64_t j = 0; j < N; ++j) {
+                float acc = (B != nullptr) ? B[j] : 0.0f;
+                const float* w_row = W + j * K;
+                for (int64_t k = 0; k < K; ++k) {
+                    acc += x_row[k] * w_row[k];
+                }
+                out_row[j] = acc;
+                if (acc > max_val) {
+                    max_val = acc;
+                }
             }
-            out_row[j] = acc;
-            if (acc > max_val) {
-                max_val = acc;
+
+            // 2. Exponentiation with numerical stability shift
+            float sum_exp = 0.0f;
+            for (int64_t j = 0; j < N; ++j) {
+                float exp_val = std::exp(out_row[j] - max_val);
+                out_row[j] = exp_val;
+                sum_exp += exp_val;
+            }
+
+            // 3. Normalization
+            const float inv_sum = (sum_exp > 0.0f) ? (1.0f / sum_exp) : 1.0f;
+            for (int64_t j = 0; j < N; ++j) {
+                out_row[j] *= inv_sum;
             }
         }
+    };
 
-        // 2. Exponentiation with numerical stability shift
-        float sum_exp = 0.0f;
-        for (int64_t j = 0; j < N; ++j) {
-            float exp_val = std::exp(out_row[j] - max_val);
-            out_row[j] = exp_val;
-            sum_exp += exp_val;
-        }
-
-        // 3. Normalization
-        const float inv_sum = (sum_exp > 0.0f) ? (1.0f / sum_exp) : 1.0f;
-        for (int64_t j = 0; j < N; ++j) {
-            out_row[j] *= inv_sum;
-        }
+    size_t total_work = static_cast<size_t>(M) * N * K;
+    if (total_work >= PARALLEL_WORKLOAD_THRESHOLD && M > 1) {
+        get_global_thread_pool().parallel_for(0, static_cast<size_t>(M), compute_row_range);
+    } else {
+        compute_row_range(0, static_cast<size_t>(M));
     }
 }
 
@@ -500,24 +625,33 @@ void fused_qlinear_relu_int8(
 
     const float combined_scale = scale_x * scale_w;
 
-    for (int64_t i = 0; i < M; ++i) {
-        const int8_t* x_row = X + i * K;
-        float* out_row = OUT + i * N;
+    auto compute_row_range = [&](size_t r_start, size_t r_end) {
+        for (size_t i = r_start; i < r_end; ++i) {
+            const int8_t* x_row = X + i * K;
+            float* out_row = OUT + i * N;
 
-        for (int64_t j = 0; j < N; ++j) {
-            float b_val = (B != nullptr) ? B[j] : 0.0f;
-            const int8_t* w_row = W + j * K;
-            int32_t acc_int = 0;
+            for (int64_t j = 0; j < N; ++j) {
+                float b_val = (B != nullptr) ? B[j] : 0.0f;
+                const int8_t* w_row = W + j * K;
+                int32_t acc_int = 0;
 
-            for (int64_t k = 0; k < K; ++k) {
-                const int32_t x_val = static_cast<int32_t>(x_row[k]) - zp_x;
-                const int32_t w_val = static_cast<int32_t>(w_row[k]) - zp_w;
-                acc_int += x_val * w_val;
+                for (int64_t k = 0; k < K; ++k) {
+                    const int32_t x_val = static_cast<int32_t>(x_row[k]) - zp_x;
+                    const int32_t w_val = static_cast<int32_t>(w_row[k]) - zp_w;
+                    acc_int += x_val * w_val;
+                }
+
+                float val = static_cast<float>(acc_int) * combined_scale + b_val;
+                out_row[j] = std::max(0.0f, val);
             }
-
-            float val = static_cast<float>(acc_int) * combined_scale + b_val;
-            out_row[j] = std::max(0.0f, val);
         }
+    };
+
+    size_t total_work = static_cast<size_t>(M) * N * K;
+    if (total_work >= PARALLEL_WORKLOAD_THRESHOLD && M > 1) {
+        get_global_thread_pool().parallel_for(0, static_cast<size_t>(M), compute_row_range);
+    } else {
+        compute_row_range(0, static_cast<size_t>(M));
     }
 }
 

@@ -6,9 +6,13 @@ from tensorforge.backend.dispatcher import (
     backend_context,
     get_backend,
     get_last_backend,
+    get_num_threads,
     set_backend,
+    set_last_backend,
+    set_num_threads,
 )
 from tensorforge.inference import (
+    BufferLifetime,
     CompiledPlanCache,
     ExecutionPlan,
     ExecutionStep,
@@ -17,7 +21,9 @@ from tensorforge.inference import (
     InferenceGraph,
     InferenceNode,
     InferenceRuntime,
+    MemoryPlan,
     MemoryPlanner,
+    MemoryRegion,
     ModelLoader,
     OperatorFusionPass,
     PlannedBuffer,
@@ -100,7 +106,7 @@ from tensorforge.utils.validation import (
     TensorForgeError,
 )
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 __all__ = [
     "__version__",
@@ -123,7 +129,7 @@ __all__ = [
     "randn",
     "arange",
     "from_numpy",
-    # Inference Compiler, Planning & Runtime
+    # Inference Compiler, Memory Planning & Parallel Runtime
     "InferenceRuntime",
     "ModelLoader",
     "InferenceGraph",
@@ -134,6 +140,9 @@ __all__ = [
     "ExecutionPlan",
     "ExecutionStep",
     "MemoryPlanner",
+    "MemoryPlan",
+    "BufferLifetime",
+    "MemoryRegion",
     "PlannedBuffer",
     "ShapePropagator",
     "CompiledPlanCache",
@@ -151,11 +160,13 @@ __all__ = [
     "quantize_tensor",
     "dequantize_tensor",
     "qmatmul",
-    # Backend Control
+    # Backend & Thread Control
     "set_backend",
     "get_backend",
     "get_last_backend",
     "backend_context",
+    "set_num_threads",
+    "get_num_threads",
     # Autograd
     "backward",
     "no_grad",

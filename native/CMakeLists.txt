@@ -20,6 +20,7 @@ set(NATIVE_SOURCES
     src/allocator.cpp
     src/storage.cpp
     src/arena.cpp
+    src/thread_pool.cpp
     src/tensor.cpp
     src/kernels.cpp
 )

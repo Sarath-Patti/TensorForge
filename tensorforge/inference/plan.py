@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 
+from tensorforge.inference.memory import MemoryPlan
 from tensorforge.tensor.dtype import DType, float32
 
 
@@ -24,6 +25,9 @@ class ExecutionStep:
         attrs: Optional[Dict[str, Any]] = None,
         dtype: DType = float32,
         is_quantized: bool = False,
+        is_parallelizable: bool = False,
+        estimated_flops: int = 0,
+        num_threads: int = 1,
     ) -> None:
         self.step_index: int = step_index
         self.op_type: str = op_type
@@ -36,19 +40,23 @@ class ExecutionStep:
         self.attrs: Dict[str, Any] = attrs or {}
         self.dtype: DType = dtype
         self.is_quantized: bool = is_quantized
+        self.is_parallelizable: bool = is_parallelizable
+        self.estimated_flops: int = estimated_flops
+        self.num_threads: int = num_threads
 
     def __repr__(self) -> str:
         in_desc = f"slot_{self.input_slot}" if self.input_slot >= 0 else "user_input"
         out_desc = f"slot_{self.output_slot}"
         quant_str = ", quantized=True" if self.is_quantized else ""
+        par_str = f", parallel(threads={self.num_threads})" if self.is_parallelizable else ""
         return (
             f"ExecutionStep[{self.step_index}]({self.op_type}, {in_desc} -> {out_desc}, "
-            f"shape={self.input_shape}->{self.output_shape}, backend='{self.backend_dispatch}'{quant_str})"
+            f"shape={self.input_shape}->{self.output_shape}, backend='{self.backend_dispatch}'{quant_str}{par_str})"
         )
 
 
 class ExecutionPlan:
-    """Compiled, reusable inference execution plan holding ordered steps and memory workspace layouts."""
+    """Compiled, reusable inference execution plan holding ordered steps, memory layouts, and parallel strategies."""
 
     def __init__(
         self,
@@ -59,6 +67,7 @@ class ExecutionPlan:
         target_backend: str,
         dtype: DType = float32,
         is_quantized: bool = False,
+        num_threads: int = 1,
     ) -> None:
         self.steps: List[ExecutionStep] = list(steps)
         self.input_shape: Tuple[int, ...] = tuple(input_shape)
@@ -67,6 +76,12 @@ class ExecutionPlan:
         self.target_backend: str = target_backend
         self.dtype: DType = dtype
         self.is_quantized: bool = is_quantized
+        self.num_threads: int = num_threads
+
+    @property
+    def memory_plan(self) -> Optional[MemoryPlan]:
+        """Underlying MemoryPlan instance with region details."""
+        return self.workspace_plan.get("memory_plan")
 
     @property
     def total_workspace_bytes(self) -> int:
@@ -91,7 +106,7 @@ class ExecutionPlan:
         """Format a human-readable summary of the compiled plan."""
         lines = [
             f"ExecutionPlan (Steps: {len(self.steps)}, Backend: '{self.target_backend}', "
-            f"Workspace: {self.total_workspace_bytes} bytes, Quantized: {self.is_quantized}):",
+            f"Workspace: {self.total_workspace_bytes} bytes, Quantized: {self.is_quantized}, Threads: {self.num_threads}):",
             f"  Input Shape:  {self.input_shape}",
             f"  Output Shape: {self.output_shape}",
             "  Execution Steps:",

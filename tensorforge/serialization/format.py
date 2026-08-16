@@ -15,7 +15,7 @@ from tensorforge.tensor.tensor import Tensor
 from tensorforge.utils.validation import SerializationError
 
 FORMAT_VERSION = "1.0"
-LIBRARY_VERSION = "1.1.0"
+LIBRARY_VERSION = "1.2.0"
 
 
 def extract_module_architecture(module: Any) -> Optional[Dict[str, Any]]:

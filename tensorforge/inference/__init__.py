@@ -1,10 +1,10 @@
-"""TensorForge Production Inference Runtime, Compiler & Execution Planning Subsystem."""
+"""TensorForge Production Inference Runtime, Compiler, Memory Planner & Parallel CPU Execution Subsystem."""
 
 from tensorforge.inference.compiler import CompiledPlanCache, InferenceCompiler
 from tensorforge.inference.fusion import OperatorFusionPass
 from tensorforge.inference.graph import InferenceGraph, InferenceNode
 from tensorforge.inference.loader import ModelLoader
-from tensorforge.inference.memory import MemoryPlanner, PlannedBuffer
+from tensorforge.inference.memory import BufferLifetime, MemoryPlan, MemoryPlanner, MemoryRegion, PlannedBuffer
 from tensorforge.inference.optimizer import GraphOptimizer
 from tensorforge.inference.plan import ExecutionPlan, ExecutionStep
 from tensorforge.inference.runtime import InferenceRuntime
@@ -21,6 +21,9 @@ __all__ = [
     "ExecutionPlan",
     "ExecutionStep",
     "MemoryPlanner",
+    "MemoryPlan",
+    "BufferLifetime",
+    "MemoryRegion",
     "PlannedBuffer",
     "ShapePropagator",
     "CompiledPlanCache",

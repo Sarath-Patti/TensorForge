@@ -4,10 +4,10 @@
 
 ---
 
-## Current Milestone: `v1.1 – Inference Compiler & Execution Planning`
+## Current Milestone: `v1.2 – Runtime Memory Optimization & Parallel CPU Execution`
 
-> **Development Status:** `v1.1 (Production Release)`
-> TensorForge v1.1 introduces an ahead-of-time **Inference Compiler & Memory Planner** (`InferenceCompiler`, `ExecutionPlan`, `WorkspaceArena`). Building upon v1.0 operator fusion, v1.1 statically analyzes tensor shape flows, conducts buffer liveness analysis to eliminate steady-state memory allocations, pre-binds optimal native C++ kernel dispatches, and caches execution plans for zero-overhead repeated predictions across FP32 and INT8 workloads.
+> **Development Status:** `v1.2 (Production Release)`
+> TensorForge v1.2 enhances the production inference runtime with general **Interval-Based Memory Lifetime Planning** and **Multi-Threaded Parallel CPU Execution** (`ThreadPool`, `MemoryPlan`, `MemoryRegion`). By analyzing intermediate buffer liveness intervals, the runtime packs transient activations into 64-byte aligned reusable memory regions. Concurrently, native C++ kernels leverage row-partitioned multi-threading across independent output slices with zero data races and dynamic thread configuration.
 
 ---
 
@@ -37,59 +37,44 @@ Operator Fusion Pass (FusedLinear: ReLU, Sigmoid, Tanh, Softmax)
   ▼
 Inference Compiler (InferenceCompiler, CompiledPlanCache)
   ├── Static Shape Propagation (ShapePropagator)
-  ├── Buffer Lifetime & Reuse Planning (MemoryPlanner)
-  └── Ahead-of-Time Kernel Resolution (ExecutionStep)
+  ├── Interval Memory Planner & Region Reuse (MemoryPlanner, MemoryPlan)
+  ├── Parallel Workload Evaluator & Thread Allocation (ExecutionStep)
+  └── Plan Cache
   │
   ▼
-Execution Plan IR (ExecutionPlan, 64-Byte Aligned Ping-Pong Slots)
+Execution Plan IR (ExecutionPlan, MemoryRegions, Parallel Flags)
   │
   ▼
-Native C++ Memory Arena & Kernel Execution (WorkspaceArena, CPU Kernels)
+Native C++ Parallel Runtime & Memory Arena (WorkspaceArena, ThreadPool, CPU Kernels)
 ```
 
 ---
 
-## Key Features & Compiler Subsystems
+## Key Features & Subsystems
 
-### 1. Execution Plan IR (`tensorforge/inference/plan.py`)
-- **`ExecutionStep`:** Pre-resolved instruction storing operator type, input slot ID, output slot ID, input/output tensor shapes, parameter references, and pre-bound backend dispatch (`native_fused`, `native`, `numpy_fused`, `numpy`).
-- **`ExecutionPlan`:** Immutable, deterministic execution schedule containing ordered execution steps, workspace memory layouts, and shape metadata.
+### 1. Interval Memory Lifetime Analysis (`tensorforge/inference/memory.py`)
+- **`BufferLifetime`:** Tracks creation (`first_use`) and final read (`last_use`) intervals for all intermediate activations.
+- **`MemoryRegion`:** Allocates contiguous, reusable physical memory regions packed with 64-byte SIMD alignment padding.
+- **`MemoryPlanner`:** Uses interval coloring to schedule buffers into non-overlapping regions, minimizing peak workspace consumption across general topologies.
 
-### 2. Static Shape Propagation (`tensorforge/inference/shapes.py`)
-- **`ShapePropagator`:** Infers input and output shapes through `Linear`, `ReLU`, `Sigmoid`, `Tanh`, `Softmax`, and `FusedLinear` without evaluating tensors or allocating runtime memory.
-- Incompatible feature dimensions or invalid inputs trigger descriptive `ShapeError` exceptions ahead of execution.
+### 2. Multi-Threaded Parallel CPU Subsystem (`native/include/tensorforge/thread_pool.hpp`, `native/src/thread_pool.cpp`)
+- **`ThreadPool`:** Lightweight, header-backed C++17 thread pool creating reusable worker threads across predictions with clean RAII shutdown.
+- **Row-Level Output Partitioning:** Distributes $M$ output rows across worker threads for `matmul`, `fused_linear`, and activation fusions, ensuring each thread writes exclusively to independent memory addresses.
+- **Small Workload Fallback:** Workloads below `PARALLEL_WORKLOAD_THRESHOLD` ($< 8192$ operations or batch size $\le 1$) execute synchronously on the calling thread to eliminate synchronization overhead.
 
-### 3. Inference Memory Planner (`tensorforge/inference/memory.py`)
-- **`MemoryPlanner`:** Conducts liveness interval analysis across the execution graph.
-- Implements ping-pong workspace slot allocation (`slot 0` $\leftrightarrow$ `slot 1`), bounding intermediate memory overhead to at most two reusable memory buffers regardless of network depth.
-- Computes 64-byte aligned memory offsets and exact peak workspace capacity requirements.
+### 3. Thread Configuration APIs
+- Global configuration: `tensorforge.backend.set_num_threads(n)` / `tensorforge.backend.get_num_threads()`.
+- Runtime-level configuration: `runtime.set_num_threads(n)` / `runtime.num_threads`.
 
-### 4. Native Workspace Arena (`native/include/tensorforge/arena.hpp`, `native/src/arena.cpp`)
-- **`WorkspaceArena`:** RAII-managed contiguous CPU memory block allocated using 64-byte aligned allocators.
-- Eliminates dynamic heap allocation and system call overhead during prediction loops.
-
-### 5. Compiled Plan Cache (`tensorforge/inference/compiler.py`)
-- **`CompiledPlanCache`:** In-memory plan cache indexed by `(graph_id, input_shape, dtype, backend, is_quantized)`.
-- Eliminates redundant graph parsing, shape propagation, and memory planning for repeated predictions.
-
----
-
-## Fallback & Execution Hierarchy
-
-TensorForge provides guaranteed deterministic execution through an automated 4-tier fallback hierarchy:
-
-```
-1. Compiled Fused Native C++   ──(if native extension loaded & operands eligible)──►
-2. Compiled Fused NumPy Ref    ──(if native unavailable / input requires fallback)──►
-3. Eager Fused Native C++      ──(if uncompiled & native backend selected)────────►
-4. Eager NumPy Reference       ──(universal base reference)────────────────────────►
-```
+### 4. Thread-Safety Guarantees & Constraints
+- **Parameters:** Weight parameters are strictly immutable during inference, preventing race conditions on model weights.
+- **Instance Concurrency:** A single `InferenceRuntime` instance uses internal stateful planning descriptors and workspace memory slots. Concurrent predictions on the exact same `InferenceRuntime` instance should use separate runtime instances or be externally synchronized.
 
 ---
 
 ## Inference Runtime Usage Examples
 
-### 1. Compiling and Executing a Model
+### 1. Compiling and Running Multi-Threaded Inference
 
 ```python
 import tensorforge as tf
@@ -98,47 +83,32 @@ from tensorforge.inference import InferenceRuntime
 # 1. Load exported model artifact (.tfmodel)
 runtime = InferenceRuntime.load("classifier.tfmodel")
 
-# 2. Compile model for expected input shape
-runtime.compile(input_shape=(8, 16))
+# 2. Configure 4 CPU worker threads and compile for batch size 32
+runtime.set_num_threads(4)
+runtime.compile(input_shape=(32, 16))
 
-# 3. Inspect compiled summary
+# 3. Inspect runtime and memory plan
 summary = runtime.summary()
-print(f"Is Compiled:       {summary['is_compiled']}")
-print(f"Compiled Steps:    {summary['compiled_steps']}")
-print(f"Workspace Memory:  {summary['workspace_bytes']} bytes")
-print(f"Active Backend:    {summary['backend']}")
+print(f"Active Backend:      {summary['backend']}")
+print(f"Configured Threads:  {summary['num_threads']}")
+print(f"Workspace Memory:    {summary['workspace_bytes']} bytes")
+print(f"Memory Regions:      {summary['workspace_regions']}")
+print(f"Reused Buffers:      {summary['reused_buffers']}")
 
-# 4. Inspect ExecutionPlan IR
-print(runtime.execution_plan.summary())
-
-# 5. Predict with zero allocation overhead
-x = tf.randn((8, 16))
+# 4. Predict with multi-threaded parallel execution
+x = tf.randn((32, 16))
 predictions = runtime.predict(x)
 
 assert predictions.requires_grad is False
 assert predictions.grad_fn is None
 ```
 
-### 2. Dynamic Batch Compilation & Cached Execution
+### 2. Inspecting Reusable Memory Regions
 
 ```python
-# The runtime automatically retrieves or compiles plans for different batch sizes
-out_single = runtime.predict(tf.randn((1, 16)))    # Batch size 1
-out_batch  = runtime.predict(tf.randn((32, 16)))   # Batch size 32
-```
-
-### 3. INT8 Low-Precision Compiled Inference
-
-```python
-from tensorforge.inference import InferenceRuntime
-
-# Load quantized model and compile
-runtime_int8 = InferenceRuntime.load("quantized_classifier.tfmodel").compile(input_shape=(8, 16))
-
-print(f"Quantized: {runtime_int8.is_quantized}")
-print(f"Compiled:  {runtime_int8.is_compiled}")
-
-output = runtime_int8.predict(x)
+mem_plan = runtime.memory_plan
+for r_id, region in mem_plan.regions.items():
+    print(f"Region {r_id}: Capacity={region.size_bytes}B, Offset={region.offset_bytes}B, Buffers={region.assigned_buffers}")
 ```
 
 ---
@@ -146,11 +116,14 @@ output = runtime_int8.predict(x)
 ## Running Benchmarks & Demonstrations
 
 ```bash
+# Parallel multi-threaded inference demonstration
+python examples/parallel_inference_demo.py
+
+# Multi-thread scaling performance benchmark (1, 2, 4, 8 threads)
+python benchmarks/benchmark_inference.py
+
 # Compiled inference demonstration
 python examples/compiled_inference_demo.py
-
-# Production inference performance benchmark (Eager vs Fused vs Compiled)
-python benchmarks/benchmark_inference.py
 
 # Operator fusion demonstration
 python examples/inference_demo.py
@@ -172,18 +145,20 @@ TensorForge/
 │   ├── CMakeLists.txt               # CMake build configuration
 │   ├── include/tensorforge/         # Public C++ headers
 │   │   ├── allocator.hpp            # 64-byte aligned CPU allocator
-│   │   ├── arena.hpp                # NEW: 64-byte aligned workspace arena
+│   │   ├── arena.hpp                # 64-byte aligned workspace arena
+│   │   ├── thread_pool.hpp          # NEW: C++17 inference ThreadPool
 │   │   ├── dtype.hpp                # DType enum & traits
-│   │   ├── kernels.hpp              # Unfused & Fused inference kernels
+│   │   ├── kernels.hpp              # Parallel CPU compute kernels
 │   │   ├── shape.hpp                # Shape & contiguous stride math
 │   │   ├── storage.hpp              # Native Storage buffer
 │   │   └── tensor.hpp               # Native Tensor abstraction
 │   ├── src/                         # Native implementations & pybind11 bindings
 │   │   ├── allocator.cpp
-│   │   ├── arena.cpp                # NEW: WorkspaceArena implementation
-│   │   ├── bindings.cpp             # pybind11 module bindings
+│   │   ├── arena.cpp                # WorkspaceArena implementation
+│   │   ├── thread_pool.cpp          # NEW: ThreadPool implementation
+│   │   ├── bindings.cpp             # pybind11 module bindings (thread controls)
 │   │   ├── dtype.cpp
-│   │   ├── kernels.cpp              # Handcrafted SIMD-friendly compute kernels
+│   │   ├── kernels.cpp              # Multi-threaded parallel compute kernels
 │   │   ├── shape.cpp
 │   │   ├── storage.cpp
 │   │   └── tensor.cpp
@@ -191,21 +166,21 @@ TensorForge/
 │       └── test_native.cpp          # Standalone C++ test suite
 │
 ├── tensorforge/
-│   ├── __init__.py                  # Top-level exports & version (1.1.0)
-│   ├── inference/                   # Production Inference & Compiler Subsystem
+│   ├── __init__.py                  # Top-level exports & version (1.2.0)
+│   ├── inference/                   # Production Inference, Compiler & Parallel Subsystem
 │   │   ├── __init__.py              # Public inference exports
-│   │   ├── compiler.py              # NEW: InferenceCompiler & CompiledPlanCache
-│   │   ├── plan.py                  # NEW: ExecutionPlan and ExecutionStep IR
-│   │   ├── shapes.py                # NEW: Static ShapePropagator engine
-│   │   ├── memory.py                # NEW: MemoryPlanner & buffer lifetime reuse
+│   │   ├── compiler.py              # InferenceCompiler & CompiledPlanCache
+│   │   ├── plan.py                  # ExecutionPlan & ExecutionStep IR (parallel flags)
+│   │   ├── shapes.py                # Static ShapePropagator engine
+│   │   ├── memory.py                # Interval-based MemoryPlanner & MemoryPlan
 │   │   ├── graph.py                 # InferenceGraph and InferenceNode representations
 │   │   ├── fusion.py                # OperatorFusionPass pattern matching engine
 │   │   ├── optimizer.py             # GraphOptimizer execution dispatcher
-│   │   ├── runtime.py               # InferenceRuntime engine with compile() API
+│   │   ├── runtime.py               # InferenceRuntime (thread controls & memory plan)
 │   │   └── loader.py                # ModelLoader & architecture reconstitution
 │   ├── serialization/               # Model Serialization Subsystem (.tfmodel, .tfckpt)
 │   ├── quantization/                # Quantization Subsystem (INT8, Calibration, qmatmul)
-│   ├── backend/                     # Multi-backend Dispatcher Subsystem
+│   ├── backend/                     # Multi-backend Dispatcher & Thread Subsystem
 │   ├── optim/                       # Optimizer subsystem (SGD, Adam)
 │   ├── nn/                          # Neural Network subsystem (Linear, Sequential, etc.)
 │   ├── autograd/                    # Automatic Differentiation DAG engine
@@ -213,14 +188,18 @@ TensorForge/
 │   └── utils/                       # Validation & Exception hierarchy
 │
 ├── tests/                           # Python Test Suite
-│   ├── inference/                   # Inference & Compiler test suite
-│   │   ├── test_compiler.py         # NEW: Graph to ExecutionPlan conversion tests
-│   │   ├── test_shapes.py           # NEW: Static shape propagation tests
-│   │   ├── test_memory_planner.py   # NEW: Buffer lifetime & reuse tests
-│   │   ├── test_compiled_runtime.py # NEW: compile(), caching, and execution tests
-│   │   ├── test_fusion.py           # Operator fusion pattern tests
-│   │   ├── test_fused_correctness.py# Fused mathematical parity tests
-│   │   ├── test_fused_backend_dispatch.py # Multi-backend execution tests
+│   ├── inference/                   # Inference & Parallel test suite
+│   │   ├── test_memory_lifetime.py  # NEW: Interval liveness & memory region tests
+│   │   ├── test_thread_pool.py      # NEW: CPU thread pool configuration tests
+│   │   ├── test_parallel_kernels.py # NEW: Parallel kernel numerical parity tests
+│   │   ├── test_parallel_runtime.py # NEW: Multi-threaded runtime & immutability tests
+│   │   ├── test_compiler.py
+│   │   ├── test_shapes.py
+│   │   ├── test_memory_planner.py
+│   │   ├── test_compiled_runtime.py
+│   │   ├── test_fusion.py
+│   │   ├── test_fused_correctness.py
+│   │   ├── test_fused_backend_dispatch.py
 │   │   ├── test_loader.py
 │   │   ├── test_runtime.py
 │   │   ├── test_fp32_inference.py
@@ -235,14 +214,15 @@ TensorForge/
 │   └── optim/
 │
 ├── examples/                        # Demonstrations
-│   ├── compiled_inference_demo.py   # NEW: Compiled inference & execution plan demo
-│   ├── inference_demo.py            # Operator fusion demo
+│   ├── parallel_inference_demo.py   # NEW: Parallel CPU execution & memory plan demo
+│   ├── compiled_inference_demo.py
+│   ├── inference_demo.py
 │   ├── serialization_demo.py
 │   ├── quantization_demo.py
 │   └── training_demo.py
 │
 ├── benchmarks/                      # Performance Benchmarks
-│   ├── benchmark_inference.py       # Eager vs Fused vs Compiled benchmark
+│   ├── benchmark_inference.py       # Thread scaling & backend comparative benchmark
 │   ├── benchmark_quantization.py
 │   └── benchmark_matmul.py
 │
@@ -268,3 +248,4 @@ TensorForge/
 | **v0.9 – Portable Inference Runtime & Model Export** | **Complete** | Dedicated InferenceRuntime, ModelLoader, zero-code architecture reconstitution, multi-backend dispatch |
 | **v1.0 – Production Inference Engine & Operator Fusion** | **Complete** | InferenceGraph, OperatorFusionPass, native fused C++ kernels, multi-backend fallback, production release |
 | **v1.1 – Inference Compiler & Execution Planning** | **Complete** | InferenceCompiler, ExecutionPlan IR, static shape propagation, memory planner, native arena, plan caching |
+| **v1.2 – Runtime Memory Optimization & Parallel CPU Execution** | **Complete** | Interval memory planner, MemoryRegions, native ThreadPool, parallel CPU kernels, thread scaling |

@@ -1,4 +1,4 @@
-"""Backend dispatch and execution management for TensorForge."""
+"""Backend dispatch, execution, and CPU thread management for TensorForge."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from tensorforge.utils.validation import TensorForgeError
 
 _ACTIVE_BACKEND: str = "numpy"
 _LAST_BACKEND: str = "numpy"
+_NUM_THREADS: int = 4
 
 
 def get_backend() -> str:
@@ -51,6 +52,47 @@ def set_last_backend(name: str) -> None:
     _LAST_BACKEND = name
 
 
+def set_num_threads(num_threads: int) -> None:
+    """Set the number of CPU threads used for parallel native inference execution.
+
+    Args:
+        num_threads: Number of worker threads (must be >= 1).
+
+    Raises:
+        TensorForgeError: If num_threads < 1.
+    """
+    global _NUM_THREADS
+    if not isinstance(num_threads, int) or num_threads < 1:
+        raise TensorForgeError(f"num_threads must be a positive integer >= 1, got {num_threads}.")
+
+    _NUM_THREADS = num_threads
+    if is_native_available():
+        try:
+            import _tensorforge_native as _native
+            _native.set_num_threads(num_threads)
+        except (ImportError, AttributeError):
+            try:
+                from tensorforge import _tensorforge_native as _native
+                _native.set_num_threads(num_threads)
+            except (ImportError, AttributeError):
+                pass
+
+
+def get_num_threads() -> int:
+    """Get the currently configured CPU thread count."""
+    if is_native_available():
+        try:
+            import _tensorforge_native as _native
+            return int(_native.get_num_threads())
+        except (ImportError, AttributeError):
+            try:
+                from tensorforge import _tensorforge_native as _native
+                return int(_native.get_num_threads())
+            except (ImportError, AttributeError):
+                pass
+    return _NUM_THREADS
+
+
 class backend_context(ContextDecorator):
     """Context manager for temporarily selecting a compute backend.
 
@@ -60,13 +102,14 @@ class backend_context(ContextDecorator):
     """
 
     def __init__(self, backend_name: str) -> None:
-        self.target_backend = backend_name
-        self.prev_backend = get_backend()
+        self.backend_name = backend_name
+        self.prev_backend: Optional[str] = None
 
-    def __enter__(self) -> backend_context:
+    def __enter__(self) -> str:
         self.prev_backend = get_backend()
-        set_backend(self.target_backend)
-        return self
+        set_backend(self.backend_name)
+        return self.backend_name
 
-    def __exit__(self, exc_type: object, exc_val: object, exc_tb: object) -> None:
-        set_backend(self.prev_backend)
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        if self.prev_backend is not None:
+            set_backend(self.prev_backend)

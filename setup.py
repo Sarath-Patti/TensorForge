@@ -17,6 +17,7 @@ try:
                 "native/src/allocator.cpp",
                 "native/src/storage.cpp",
                 "native/src/arena.cpp",
+                "native/src/thread_pool.cpp",
                 "native/src/tensor.cpp",
                 "native/src/kernels.cpp",
                 "native/src/bindings.cpp",

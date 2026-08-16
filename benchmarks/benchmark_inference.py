@@ -1,13 +1,14 @@
-"""TensorForge v1.1 Production Inference & Compiler Benchmark.
+"""TensorForge v1.2 Production Inference, Compiler & Multi-Threaded Parallel Benchmark.
 
 Measures:
-  - Eager NumPy vs Eager Native vs Fused Native vs Compiled Native
+  - Native Single-Thread Eager vs Native Multi-Thread Eager
+  - Native Fused Single-Thread vs Native Fused Multi-Thread
+  - Native Compiled Single-Thread vs Native Compiled Multi-Thread
+  - Batch sizes: 1, 8, 32, 128, 512
+  - Thread scaling: 1, 2, 4, 8 threads
   - First-call compilation latency vs steady-state latency
-  - Latency per batch (ms)
-  - Per-sample latency (µs)
-  - Throughput (samples/sec)
-  - Workspace memory consumption
-  - Speedup of Compiled Native relative to Eager Native
+  - Latency per batch (ms), per-sample latency (µs), throughput (samples/sec)
+  - Memory workspace consumption
 """
 
 import os
@@ -16,17 +17,22 @@ import time
 import numpy as np
 import tensorforge as tf
 import tensorforge.nn as nn
-from tensorforge.backend import is_native_available
+from tensorforge.backend import get_num_threads, is_native_available, set_num_threads
 from tensorforge.inference import InferenceRuntime
 from tensorforge.serialization import save_model
 
 
-def benchmark_inference(batch_sizes=[1, 8, 32, 128], num_warmup=15, num_repeats=50):
-    print("=" * 115)
-    print("TensorForge v1.1: Production Inference Compiler & Execution Planning Benchmark")
+def benchmark_inference(
+    batch_sizes=[1, 8, 32, 128, 512],
+    thread_counts=[1, 2, 4, 8],
+    num_warmup=15,
+    num_repeats=50,
+):
+    print("=" * 125)
+    print("TensorForge v1.2: Memory Optimization & Parallel CPU Execution Benchmark")
     native_avail = is_native_available()
     print(f"Native C++ Backend Available: {native_avail}")
-    print("=" * 115)
+    print("=" * 125)
 
     np.random.seed(42)
     in_features, hidden_dim, out_features = 64, 128, 10
@@ -44,24 +50,30 @@ def benchmark_inference(batch_sizes=[1, 8, 32, 128], num_warmup=15, num_repeats=
         )
         save_model(model, model_path)
 
+        # ---------------------------------------------------------------------
+        # 1. Comparative Backend & Compilation Benchmark
+        # ---------------------------------------------------------------------
         configurations = [
-            ("Eager NumPy", "numpy", False, False),
-            ("Fused NumPy", "numpy", True, False),
-            ("Compiled NumPy", "numpy", True, True),
+            ("Eager NumPy", "numpy", False, False, 1),
+            ("Fused NumPy", "numpy", True, False, 1),
+            ("Compiled NumPy", "numpy", True, True, 1),
         ]
         if native_avail:
-            configurations.append(("Eager Native", "native", False, False))
-            configurations.append(("Fused Native", "native", True, False))
-            configurations.append(("Compiled Native", "native", True, True))
+            configurations.append(("Native Eager (1 Thread)", "native", False, False, 1))
+            configurations.append(("Native Eager (4 Threads)", "native", False, False, 4))
+            configurations.append(("Native Fused (1 Thread)", "native", True, False, 1))
+            configurations.append(("Native Fused (4 Threads)", "native", True, False, 4))
+            configurations.append(("Native Compiled (1 Thread)", "native", True, True, 1))
+            configurations.append(("Native Compiled (4 Threads)", "native", True, True, 4))
 
         results = {}
 
-        for config_name, backend_name, optimize_flag, compile_flag in configurations:
-            print(f"\n--- Mode: {config_name} (Backend={backend_name}, Optimized={optimize_flag}, Compiled={compile_flag}) ---")
+        for config_name, backend_name, optimize_flag, compile_flag, threads in configurations:
+            print(f"\n--- Mode: {config_name} (Backend={backend_name}, Optimized={optimize_flag}, Compiled={compile_flag}, Threads={threads}) ---")
             print(
                 f"{'Batch Size':<12} | {'Batch Latency (ms)':<20} | {'Per-Sample (µs)':<18} | {'Throughput (samples/s)':<24} | {'Workspace (B)':<15}"
             )
-            print("-" * 95)
+            print("-" * 105)
 
             results[config_name] = {}
 
@@ -69,15 +81,12 @@ def benchmark_inference(batch_sizes=[1, 8, 32, 128], num_warmup=15, num_repeats=
                 x_test = tf.randn((b, in_features))
 
                 # Load runtime
-                runtime = InferenceRuntime.load(model_path, backend=backend_name)
+                runtime = InferenceRuntime.load(model_path, backend=backend_name, num_threads=threads)
                 if optimize_flag:
                     runtime.optimize()
 
-                compilation_ms = 0.0
                 if compile_flag:
-                    t_compile_start = time.perf_counter()
-                    runtime.compile(input_shape=(b, in_features))
-                    compilation_ms = (time.perf_counter() - t_compile_start) * 1000.0
+                    runtime.compile(input_shape=(b, in_features), num_threads=threads)
 
                 # Warmup
                 for _ in range(num_warmup):
@@ -95,25 +104,47 @@ def benchmark_inference(batch_sizes=[1, 8, 32, 128], num_warmup=15, num_repeats=
                 ws_bytes = runtime.workspace_size
 
                 results[config_name][b] = avg_batch_ms
-
                 ws_desc = f"{ws_bytes} B" if ws_bytes > 0 else "N/A"
+
                 print(
                     f"{b:<12} | {avg_batch_ms:<20.3f} | {per_sample_us:<18.2f} | {throughput:<24.1f} | {ws_desc:<15}"
                 )
 
-        # Comparative speedup summary
-        if "Compiled Native" in results and "Eager Native" in results:
-            print("\n" + "=" * 115)
-            print("Speedup Summary (Compiled Native vs Eager Native):")
-            print(f"{'Batch Size':<12} | {'Eager Native (ms)':<20} | {'Compiled Native (ms)':<22} | {'Speedup':<15}")
-            print("-" * 75)
-            for b in batch_sizes:
-                eager_t = results["Eager Native"][b]
-                compiled_t = results["Compiled Native"][b]
-                speedup = eager_t / compiled_t if compiled_t > 0 else 1.0
-                print(f"{b:<12} | {eager_t:<20.3f} | {compiled_t:<22.3f} | {speedup:<15.2f}x")
+        # ---------------------------------------------------------------------
+        # 2. Multi-Thread Scaling Benchmark (Native Compiled)
+        # ---------------------------------------------------------------------
+        if native_avail:
+            print("\n" + "=" * 125)
+            print("Parallel CPU Thread Scaling (Native Compiled Inference, Batch Size = 128):")
+            print(f"{'Thread Count':<14} | {'Batch Latency (ms)':<22} | {'Throughput (samples/s)':<26} | {'Speedup vs 1-Thread':<20}")
+            print("-" * 95)
 
-    print("=" * 115)
+            x_large = tf.randn((128, in_features))
+            st_time = 1.0
+
+            for tc in thread_counts:
+                runtime_scaled = InferenceRuntime.load(model_path, backend="native", num_threads=tc).compile(
+                    input_shape=(128, in_features), num_threads=tc
+                )
+
+                for _ in range(num_warmup):
+                    _ = runtime_scaled.predict(x_large)
+
+                start = time.perf_counter()
+                for _ in range(num_repeats):
+                    _ = runtime_scaled.predict(x_large)
+                t_total = time.perf_counter() - start
+
+                avg_ms = (t_total / num_repeats) * 1000.0
+                thru = (128 * num_repeats) / t_total
+
+                if tc == 1:
+                    st_time = avg_ms
+                speedup = st_time / avg_ms if avg_ms > 0 else 1.0
+
+                print(f"{tc:<14} | {avg_ms:<22.3f} | {thru:<26.1f} | {speedup:<20.2f}x")
+
+    print("=" * 125)
 
 
 if __name__ == "__main__":

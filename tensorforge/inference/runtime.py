@@ -1,4 +1,4 @@
-"""Dedicated Production Inference Runtime with Ahead-of-Time Compilation and Execution Planning."""
+"""Dedicated Production Inference Runtime with Ahead-of-Time Compilation and Parallel CPU Execution."""
 
 from __future__ import annotations
 
@@ -6,10 +6,18 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 import numpy as np
 
 from tensorforge.autograd.engine import no_grad
-from tensorforge.backend.dispatcher import backend_context, get_backend, get_last_backend, set_backend
+from tensorforge.backend.dispatcher import (
+    backend_context,
+    get_backend,
+    get_last_backend,
+    get_num_threads,
+    set_backend,
+    set_num_threads as set_backend_num_threads,
+)
 from tensorforge.inference.compiler import InferenceCompiler
 from tensorforge.inference.graph import InferenceGraph
 from tensorforge.inference.loader import ModelLoader
+from tensorforge.inference.memory import MemoryPlan
 from tensorforge.inference.optimizer import GraphOptimizer
 from tensorforge.inference.plan import ExecutionPlan
 from tensorforge.nn.linear import Linear
@@ -31,12 +39,17 @@ except ImportError:
 
 
 class InferenceRuntime:
-    """A production-grade inference runtime supporting Operator Fusion and Execution Planning.
+    """A production-grade inference runtime supporting Operator Fusion, Memory Planning, and Parallel CPU Execution.
 
     Loads serialized .tfmodel artifacts, reconstructs network graphs, supports graph-level
     operator fusion (Linear+ReLU, Linear+Sigmoid, Linear+Tanh, Linear+Softmax), compiles models
-    into deterministic ExecutionPlans with workspace memory reuse, and executes forward predictions
-    with strict no_grad guarantees.
+    into deterministic ExecutionPlans with memory region reuse, and executes forward predictions
+    with multi-threaded CPU parallel kernels and strict no_grad guarantees.
+
+    Thread-Safety Note:
+        A single InferenceRuntime instance maintains stateful execution structures and memory planning
+        descriptors. While weights are strictly immutable, concurrent predict() calls across multiple
+        threads on the same runtime instance should be synchronized or use dedicated runtime instances.
 
     Args:
         model: Reconstructed Module instance in evaluation mode.
@@ -44,6 +57,7 @@ class InferenceRuntime:
         is_quantized: Whether model parameters are stored in INT8 low precision.
         state_dict: State dictionary containing raw or quantized parameters.
         backend: Optional backend override ('numpy' or 'native').
+        num_threads: Number of CPU threads to configure for native parallel execution.
     """
 
     def __init__(
@@ -53,12 +67,14 @@ class InferenceRuntime:
         is_quantized: bool = False,
         state_dict: Optional[Dict[str, Any]] = None,
         backend: Optional[str] = None,
+        num_threads: Optional[int] = None,
     ) -> None:
         self._model: Module = model
         self._metadata: Dict[str, Any] = metadata
         self._is_quantized: bool = is_quantized
         self._state_dict: Dict[str, Any] = state_dict or {}
         self._backend: Optional[str] = backend
+        self._num_threads: int = num_threads if num_threads is not None else get_num_threads()
 
         self._model.eval()
 
@@ -101,6 +117,7 @@ class InferenceRuntime:
         cls,
         filepath: str,
         backend: Optional[str] = None,
+        num_threads: Optional[int] = None,
         strict: bool = True,
     ) -> InferenceRuntime:
         """Load a .tfmodel artifact and construct an InferenceRuntime.
@@ -108,6 +125,7 @@ class InferenceRuntime:
         Args:
             filepath: Path to the .tfmodel archive.
             backend: Optional backend override ('numpy' or 'native').
+            num_threads: Number of CPU threads for native execution.
             strict: Whether to enforce strict parameter key matching.
 
         Returns:
@@ -120,7 +138,38 @@ class InferenceRuntime:
             is_quantized=is_quantized,
             state_dict=state_dict,
             backend=backend,
+            num_threads=num_threads,
         )
+
+    def set_num_threads(self, num_threads: int) -> InferenceRuntime:
+        """Set the number of CPU threads used for parallel inference execution.
+
+        Args:
+            num_threads: Number of worker threads (must be >= 1).
+
+        Returns:
+            Self (enables method chaining).
+        """
+        if not isinstance(num_threads, int) or num_threads < 1:
+            raise TensorForgeError(f"num_threads must be an integer >= 1, got {num_threads}.")
+
+        self._num_threads = num_threads
+        set_backend_num_threads(num_threads)
+
+        # If already compiled, invalidate plan so it recompiles with new thread configuration
+        if self._is_compiled and self._compiled_plan is not None:
+            self.compile(
+                input_shape=self._compiled_plan.input_shape,
+                backend=self._backend,
+                num_threads=num_threads,
+            )
+
+        return self
+
+    @property
+    def num_threads(self) -> int:
+        """Current number of configured CPU worker threads."""
+        return self._num_threads
 
     def optimize(self) -> InferenceRuntime:
         """Perform graph-level operator fusion and kernel optimizations.
@@ -139,6 +188,7 @@ class InferenceRuntime:
         self,
         input_shape: Tuple[int, ...],
         backend: Optional[str] = None,
+        num_threads: Optional[int] = None,
         use_cache: bool = True,
     ) -> InferenceRuntime:
         """Compile the inference graph into a reusable, memory-planned ExecutionPlan.
@@ -146,6 +196,7 @@ class InferenceRuntime:
         Args:
             input_shape: Input tensor shape (e.g. (batch_size, in_features) or (in_features,)).
             backend: Optional backend override.
+            num_threads: Optional CPU thread count override.
             use_cache: Whether to use plan caching.
 
         Returns:
@@ -156,6 +207,7 @@ class InferenceRuntime:
 
         target_graph = self.graph
         target_backend = backend if backend is not None else self.backend
+        target_threads = num_threads if num_threads is not None else self._num_threads
 
         # Normalize 1D input shape to 2D (1, in_features) if necessary
         normalized_shape = (1, input_shape[0]) if len(input_shape) == 1 else input_shape
@@ -166,10 +218,12 @@ class InferenceRuntime:
             backend=target_backend,
             dtype=float32,
             is_quantized=self._is_quantized,
+            num_threads=target_threads,
             use_cache=use_cache,
         )
 
         self._is_compiled = True
+        self._num_threads = target_threads
 
         # Initialize native workspace arena if native runtime is available
         if target_backend == "native" and _native is not None and hasattr(_native, "WorkspaceArena"):
@@ -193,6 +247,13 @@ class InferenceRuntime:
     def execution_plan(self) -> Optional[ExecutionPlan]:
         """Access the active compiled ExecutionPlan."""
         return self._compiled_plan
+
+    @property
+    def memory_plan(self) -> Optional[MemoryPlan]:
+        """Access detailed memory planning intervals and region allocations."""
+        if self._compiled_plan is not None:
+            return self._compiled_plan.memory_plan
+        return None
 
     @property
     def workspace_size(self) -> int:
@@ -295,6 +356,7 @@ class InferenceRuntime:
                             backend=target_backend,
                             dtype=float32,
                             is_quantized=self._is_quantized,
+                            num_threads=self._num_threads,
                             use_cache=True,
                         )
                         output = InferenceCompiler.execute_plan(plan, x)
@@ -380,12 +442,13 @@ class InferenceRuntime:
 
         Returns:
             Dictionary with architecture details, graph optimization status,
-            execution plan details, workspace memory sizes, and parameter counts.
+            execution plan details, workspace memory sizes, thread counts, and parameter counts.
         """
         from tensorforge.serialization.checkpoint import compute_model_size
 
         size_stats = compute_model_size(self._state_dict if self._is_quantized else self._model)
         ws_bytes = self.workspace_size
+        mem_plan = self.memory_plan
 
         return {
             "model_type": type(self._model).__name__,
@@ -394,6 +457,7 @@ class InferenceRuntime:
             "is_optimized": self._is_optimized,
             "is_compiled": self._is_compiled,
             "backend": self.backend,
+            "num_threads": self._num_threads,
             "last_dispatch": get_last_backend(),
             "input_shape": self._input_shape,
             "output_shape": self._output_shape,
@@ -404,11 +468,14 @@ class InferenceRuntime:
             "fused_patterns": self.fused_patterns,
             "workspace_bytes": ws_bytes,
             "workspace_kb": ws_bytes / 1024.0,
+            "workspace_regions": mem_plan.num_regions if mem_plan is not None else 0,
+            "reused_buffers": mem_plan.num_reused_buffers if mem_plan is not None else 0,
+            "alignment_padding_bytes": mem_plan.alignment_padding_bytes if mem_plan is not None else 0,
             "num_parameters": size_stats["num_parameters"],
             "total_bytes": size_stats["total_bytes"],
             "size_kb": size_stats["size_kb"],
             "format_version": self._metadata.get("format_version", "1.0"),
-            "tensorforge_version": "1.1.0",
+            "tensorforge_version": "1.2.0",
         }
 
     def __repr__(self) -> str:
@@ -416,13 +483,14 @@ class InferenceRuntime:
         if self._is_optimized:
             status_items.append(f"optimized ({self.fused_count} fused)")
         if self._is_compiled:
-            status_items.append(f"compiled ({len(self._compiled_plan or [])} steps, ws={self.workspace_size}B)")
+            status_items.append(f"compiled ({len(self._compiled_plan or [])} steps, ws={self.workspace_size}B, threads={self._num_threads})")
 
         status_str = f", {', '.join(status_items)}" if status_items else ""
 
         return (
             f"InferenceRuntime(\n"
             f"  backend='{self.backend}',\n"
+            f"  num_threads={self._num_threads},\n"
             f"  is_quantized={self._is_quantized}{status_str},\n"
             f"  input_shape={self._input_shape},\n"
             f"  output_shape={self._output_shape},\n"

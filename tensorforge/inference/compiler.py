@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any, Dict, Optional, Tuple, Union
 import numpy as np
 
-from tensorforge.backend.dispatcher import get_backend, set_last_backend
+from tensorforge.backend.dispatcher import get_backend, get_num_threads, set_last_backend, set_num_threads
 from tensorforge.backend.native_backend import (
     can_native_elementwise,
     can_native_fused_linear,
@@ -46,8 +46,9 @@ class CompiledPlanCache:
         dtype: DType,
         backend: str,
         is_quantized: bool,
+        num_threads: int = 1,
     ) -> Optional[ExecutionPlan]:
-        key = (graph_id, tuple(input_shape), dtype.name, backend, is_quantized)
+        key = (graph_id, tuple(input_shape), dtype.name, backend, is_quantized, num_threads)
         return self._cache.get(key)
 
     def put(
@@ -58,8 +59,9 @@ class CompiledPlanCache:
         backend: str,
         is_quantized: bool,
         plan: ExecutionPlan,
+        num_threads: int = 1,
     ) -> None:
-        key = (graph_id, tuple(input_shape), dtype.name, backend, is_quantized)
+        key = (graph_id, tuple(input_shape), dtype.name, backend, is_quantized, num_threads)
         self._cache[key] = plan
 
     def clear(self) -> None:
@@ -82,9 +84,10 @@ class InferenceCompiler:
         backend: Optional[str] = None,
         dtype: Union[DType, str, np.dtype, type] = float32,
         is_quantized: bool = False,
+        num_threads: Optional[int] = None,
         use_cache: bool = True,
     ) -> ExecutionPlan:
-        """Compile an InferenceGraph for a specified input shape and execution backend.
+        """Compile an InferenceGraph for a specified input shape, backend, and CPU thread count.
 
         Args:
             graph: Optimized InferenceGraph.
@@ -92,6 +95,7 @@ class InferenceCompiler:
             backend: Target backend ('numpy' or 'native'). Defaults to active backend.
             dtype: Floating-point precision (default: float32).
             is_quantized: Whether graph operates in INT8 quantization mode.
+            num_threads: Number of CPU threads to configure for execution.
             use_cache: Whether to retrieve or store compiled plans in the plan cache.
 
         Returns:
@@ -99,6 +103,7 @@ class InferenceCompiler:
         """
         resolved_dtype = to_dtype(dtype)
         target_backend = backend if backend is not None else get_backend()
+        target_threads = num_threads if num_threads is not None else get_num_threads()
         graph_id = id(graph)
 
         if use_cache:
@@ -108,6 +113,7 @@ class InferenceCompiler:
                 dtype=resolved_dtype,
                 backend=target_backend,
                 is_quantized=is_quantized,
+                num_threads=target_threads,
             )
             if cached_plan is not None:
                 return cached_plan
@@ -118,7 +124,7 @@ class InferenceCompiler:
         # 2. Workspace Memory Planning
         workspace_plan = MemoryPlanner.plan_sequential_workspace(shape_flow, dtype=resolved_dtype)
 
-        # 3. Instruction & Backend Resolution
+        # 3. Instruction, Parallelism & Backend Resolution
         steps: List[ExecutionStep] = []
 
         for i, node in enumerate(graph):
@@ -136,6 +142,15 @@ class InferenceCompiler:
                 is_quantized=node_is_quantized,
             )
 
+            # Compute estimated work (FLOPs) and parallel eligibility
+            estimated_flops = cls._estimate_step_flops(node, in_shape, out_shape)
+            is_parallelizable = (
+                target_backend == "native"
+                and target_threads > 1
+                and estimated_flops >= 8192
+                and in_shape[0] > 1
+            )
+
             step = ExecutionStep(
                 step_index=i,
                 op_type=node.op_type,
@@ -148,6 +163,9 @@ class InferenceCompiler:
                 attrs=node.attrs,
                 dtype=resolved_dtype,
                 is_quantized=node_is_quantized,
+                is_parallelizable=is_parallelizable,
+                estimated_flops=estimated_flops,
+                num_threads=target_threads if is_parallelizable else 1,
             )
             steps.append(step)
 
@@ -161,6 +179,7 @@ class InferenceCompiler:
             target_backend=target_backend,
             dtype=resolved_dtype,
             is_quantized=is_quantized,
+            num_threads=target_threads,
         )
 
         if use_cache:
@@ -171,9 +190,21 @@ class InferenceCompiler:
                 backend=target_backend,
                 is_quantized=is_quantized,
                 plan=plan,
+                num_threads=target_threads,
             )
 
         return plan
+
+    @classmethod
+    def _estimate_step_flops(cls, node: InferenceNode, in_shape: Tuple[int, ...], out_shape: Tuple[int, ...]) -> int:
+        """Estimate the computational workload in FLOPs for an inference step."""
+        op_type = node.op_type
+        if op_type in ("Linear", "FusedLinear"):
+            m = in_shape[0] if len(in_shape) >= 2 else 1
+            k = in_shape[-1]
+            n = out_shape[-1]
+            return 2 * int(m) * int(n) * int(k)
+        return int(np.prod(out_shape))
 
     @classmethod
     def _resolve_backend_dispatch(
@@ -302,7 +333,8 @@ class InferenceCompiler:
                     else:
                         out_arr = native_fused_linear(x_arr, w_arr, b_arr)
 
-                set_last_backend("native (compiled fused)")
+                disp_name = "native (parallel fused)" if step.is_parallelizable else "native (compiled fused)"
+                set_last_backend(disp_name)
                 return Tensor(out_arr, dtype=float32)
 
             else:
@@ -342,7 +374,8 @@ class InferenceCompiler:
                 b_arr = bias.numpy() if isinstance(bias, Tensor) else (np.asarray(bias, dtype=np.float32) if bias is not None else None)
                 x_arr = x.numpy() if isinstance(x, Tensor) else np.asarray(x, dtype=np.float32)
                 out_arr = native_fused_linear(x_arr, w_arr, b_arr)
-                set_last_backend("native (compiled)")
+                disp_name = "native (parallel)" if step.is_parallelizable else "native (compiled)"
+                set_last_backend(disp_name)
                 return Tensor(out_arr, dtype=float32)
             else:
                 if step.is_quantized or isinstance(weight, QuantizedTensor):

@@ -8,6 +8,7 @@
 #include "tensorforge/shape.hpp"
 #include "tensorforge/storage.hpp"
 #include "tensorforge/tensor.hpp"
+#include "tensorforge/thread_pool.hpp"
 
 namespace py = pybind11;
 using namespace tensorforge;
@@ -19,6 +20,8 @@ PYBIND11_MODULE(_tensorforge_native, m) {
     m.def("native_allocated_bytes", []() {
         return get_default_cpu_allocator()->allocated_bytes();
     }, "Return total active memory allocated via native CPU allocator in bytes.");
+    m.def("set_num_threads", &set_global_num_threads, py::arg("num_threads"), "Set the global native thread pool size.");
+    m.def("get_num_threads", &get_global_num_threads, "Get the global native thread pool size.");
 
     py::enum_<DType>(m, "DType")
         .value("Float32", DType::Float32)
