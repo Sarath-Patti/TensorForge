@@ -9,8 +9,12 @@ from tensorforge.backend.dispatcher import (
     set_backend,
 )
 from tensorforge.inference import (
+    GraphOptimizer,
+    InferenceGraph,
+    InferenceNode,
     InferenceRuntime,
     ModelLoader,
+    OperatorFusionPass,
 )
 from tensorforge.quantization import (
     QuantizedTensor,
@@ -89,7 +93,7 @@ from tensorforge.utils.validation import (
     TensorForgeError,
 )
 
-__version__ = "0.9.0"
+__version__ = "1.0.0"
 
 __all__ = [
     "__version__",
@@ -112,9 +116,13 @@ __all__ = [
     "randn",
     "arange",
     "from_numpy",
-    # Inference Runtime
+    # Inference Runtime & Operator Fusion
     "InferenceRuntime",
     "ModelLoader",
+    "InferenceGraph",
+    "InferenceNode",
+    "OperatorFusionPass",
+    "GraphOptimizer",
     # Serialization
     "save_model",
     "load_model",

@@ -37,13 +37,7 @@ def _ptr_to_numpy(ptr: int, shape: Tuple[int, ...], dtype: Union[np.dtype, type,
 
 
 def can_native_elementwise(a_dtype: object, a_shape: Tuple[int, ...], b_dtype: object, b_shape: Tuple[int, ...]) -> bool:
-    """Check if two operands are eligible for native C++ element-wise kernel execution.
-
-    Prerequisites:
-        - Native extension is available.
-        - Both operands are float32.
-        - Both operands have identical shapes (no multi-dimensional broadcasting required).
-    """
+    """Check if two operands are eligible for native C++ element-wise kernel execution."""
     if not is_native_available() or _native is None:
         return False
     if a_dtype != float32 or b_dtype != float32:
@@ -52,13 +46,7 @@ def can_native_elementwise(a_dtype: object, a_shape: Tuple[int, ...], b_dtype: o
 
 
 def can_native_matmul(a_dtype: object, a_ndim: int, a_shape: Tuple[int, ...], b_dtype: object, b_ndim: int, b_shape: Tuple[int, ...]) -> bool:
-    """Check if matrix multiplication operands are eligible for native C++ matmul execution.
-
-    Prerequisites:
-        - Native extension is available.
-        - Both operands are float32.
-        - Both operands are strictly 2D matrices (M, K) x (K, N).
-    """
+    """Check if matrix multiplication operands are eligible for native C++ matmul execution."""
     if not is_native_available() or _native is None:
         return False
     if a_dtype != float32 or b_dtype != float32:
@@ -69,12 +57,7 @@ def can_native_matmul(a_dtype: object, a_ndim: int, a_shape: Tuple[int, ...], b_
 
 
 def can_native_qmatmul(a_ndim: int, a_shape: Tuple[int, ...], b_ndim: int, b_shape: Tuple[int, ...]) -> bool:
-    """Check if quantized matrix multiplication operands are eligible for native C++ INT8 execution.
-
-    Prerequisites:
-        - Native extension is available and has `native_qmatmul`.
-        - Both operands are strictly 2D matrices (M, K) x (K, N).
-    """
+    """Check if quantized matrix multiplication operands are eligible for native C++ INT8 execution."""
     if not is_native_available() or _native is None:
         return False
     if not hasattr(_native, "native_qmatmul"):
@@ -82,6 +65,40 @@ def can_native_qmatmul(a_ndim: int, a_shape: Tuple[int, ...], b_ndim: int, b_sha
     if a_ndim != 2 or b_ndim != 2:
         return False
     return a_shape[1] == b_shape[0]
+
+
+def can_native_fused_linear(
+    x_dtype: object,
+    x_ndim: int,
+    x_shape: Tuple[int, ...],
+    w_shape: Tuple[int, ...],
+) -> bool:
+    """Check if Linear/FusedLinear operation is eligible for native C++ execution."""
+    if not is_native_available() or _native is None:
+        return False
+    if not hasattr(_native, "native_fused_linear"):
+        return False
+    if x_dtype != float32:
+        return False
+    if x_ndim != 2 or len(w_shape) != 2:
+        return False
+    return x_shape[1] == w_shape[1]
+
+
+def can_native_fused_qlinear_relu(
+    x_ndim: int,
+    x_shape: Tuple[int, ...],
+    w_ndim: int,
+    w_shape: Tuple[int, ...],
+) -> bool:
+    """Check if INT8 Fused Linear + ReLU is eligible for native C++ execution."""
+    if not is_native_available() or _native is None:
+        return False
+    if not hasattr(_native, "native_fused_qlinear_relu"):
+        return False
+    if x_ndim != 2 or w_ndim != 2:
+        return False
+    return x_shape[1] == w_shape[1]
 
 
 def native_add(a_arr: np.ndarray, b_arr: np.ndarray) -> np.ndarray:
@@ -93,7 +110,6 @@ def native_add(a_arr: np.ndarray, b_arr: np.ndarray) -> np.ndarray:
     t_a = _native.Tensor(shape, _native.DType.Float32)
     t_b = _native.Tensor(shape, _native.DType.Float32)
 
-    # Copy input arrays into native storage
     c_a = _ptr_to_numpy(t_a.storage().data_ptr(), a_arr.shape, np.float32)
     c_b = _ptr_to_numpy(t_b.storage().data_ptr(), b_arr.shape, np.float32)
     np.copyto(c_a, a_arr)
@@ -189,3 +205,127 @@ def native_qmatmul(
     out_shape = (a_int8.shape[0], b_int8.shape[1])
     out_arr = _ptr_to_numpy(out_t.storage().data_ptr(), out_shape, np.float32).copy()
     return out_arr
+
+
+# ============================================================================
+# Fused Kernel Callers
+# ============================================================================
+
+def _prepare_fused_linear_args(
+    x_arr: np.ndarray,
+    w_arr: np.ndarray,
+    b_arr: Optional[np.ndarray],
+) -> Tuple[Any, Any, Optional[Any]]:
+    """Helper to prepare native tensors for fused linear operations."""
+    shape_x = _native.Shape(list(x_arr.shape))
+    shape_w = _native.Shape(list(w_arr.shape))
+
+    t_x = _native.Tensor(shape_x, _native.DType.Float32)
+    t_w = _native.Tensor(shape_w, _native.DType.Float32)
+
+    c_x = _ptr_to_numpy(t_x.storage().data_ptr(), x_arr.shape, np.float32)
+    c_w = _ptr_to_numpy(t_w.storage().data_ptr(), w_arr.shape, np.float32)
+    np.copyto(c_x, x_arr)
+    np.copyto(c_w, w_arr)
+
+    t_b = None
+    if b_arr is not None:
+        shape_b = _native.Shape(list(b_arr.shape))
+        t_b = _native.Tensor(shape_b, _native.DType.Float32)
+        c_b = _ptr_to_numpy(t_b.storage().data_ptr(), b_arr.shape, np.float32)
+        np.copyto(c_b, b_arr)
+
+    return t_x, t_w, t_b
+
+
+def native_fused_linear(x_arr: np.ndarray, w_arr: np.ndarray, b_arr: Optional[np.ndarray] = None) -> np.ndarray:
+    """Execute Fused Linear: out = x @ w.T + b."""
+    if _native is None or not hasattr(_native, "native_fused_linear"):
+        raise RuntimeError("Native fused_linear is not loaded.")
+
+    t_x, t_w, t_b = _prepare_fused_linear_args(x_arr, w_arr, b_arr)
+    out_t = _native.native_fused_linear(t_x, t_w, t_b)
+    out_shape = (x_arr.shape[0], w_arr.shape[0])
+    return _ptr_to_numpy(out_t.storage().data_ptr(), out_shape, np.float32).copy()
+
+
+def native_fused_linear_relu(x_arr: np.ndarray, w_arr: np.ndarray, b_arr: Optional[np.ndarray] = None) -> np.ndarray:
+    """Execute Fused Linear + ReLU: out = max(0, x @ w.T + b)."""
+    if _native is None or not hasattr(_native, "native_fused_linear_relu"):
+        raise RuntimeError("Native fused_linear_relu is not loaded.")
+
+    t_x, t_w, t_b = _prepare_fused_linear_args(x_arr, w_arr, b_arr)
+    out_t = _native.native_fused_linear_relu(t_x, t_w, t_b)
+    out_shape = (x_arr.shape[0], w_arr.shape[0])
+    return _ptr_to_numpy(out_t.storage().data_ptr(), out_shape, np.float32).copy()
+
+
+def native_fused_linear_sigmoid(x_arr: np.ndarray, w_arr: np.ndarray, b_arr: Optional[np.ndarray] = None) -> np.ndarray:
+    """Execute Fused Linear + Sigmoid: out = 1 / (1 + exp(-(x @ w.T + b)))."""
+    if _native is None or not hasattr(_native, "native_fused_linear_sigmoid"):
+        raise RuntimeError("Native fused_linear_sigmoid is not loaded.")
+
+    t_x, t_w, t_b = _prepare_fused_linear_args(x_arr, w_arr, b_arr)
+    out_t = _native.native_fused_linear_sigmoid(t_x, t_w, t_b)
+    out_shape = (x_arr.shape[0], w_arr.shape[0])
+    return _ptr_to_numpy(out_t.storage().data_ptr(), out_shape, np.float32).copy()
+
+
+def native_fused_linear_tanh(x_arr: np.ndarray, w_arr: np.ndarray, b_arr: Optional[np.ndarray] = None) -> np.ndarray:
+    """Execute Fused Linear + Tanh: out = tanh(x @ w.T + b)."""
+    if _native is None or not hasattr(_native, "native_fused_linear_tanh"):
+        raise RuntimeError("Native fused_linear_tanh is not loaded.")
+
+    t_x, t_w, t_b = _prepare_fused_linear_args(x_arr, w_arr, b_arr)
+    out_t = _native.native_fused_linear_tanh(t_x, t_w, t_b)
+    out_shape = (x_arr.shape[0], w_arr.shape[0])
+    return _ptr_to_numpy(out_t.storage().data_ptr(), out_shape, np.float32).copy()
+
+
+def native_fused_linear_softmax(x_arr: np.ndarray, w_arr: np.ndarray, b_arr: Optional[np.ndarray] = None, dim: int = -1) -> np.ndarray:
+    """Execute Fused Linear + Softmax: out = softmax(x @ w.T + b, dim=-1)."""
+    if _native is None or not hasattr(_native, "native_fused_linear_softmax"):
+        raise RuntimeError("Native fused_linear_softmax is not loaded.")
+
+    t_x, t_w, t_b = _prepare_fused_linear_args(x_arr, w_arr, b_arr)
+    out_t = _native.native_fused_linear_softmax(t_x, t_w, t_b, dim)
+    out_shape = (x_arr.shape[0], w_arr.shape[0])
+    return _ptr_to_numpy(out_t.storage().data_ptr(), out_shape, np.float32).copy()
+
+
+def native_fused_qlinear_relu(
+    x_int8: np.ndarray,
+    w_int8: np.ndarray,
+    b_arr: Optional[np.ndarray],
+    scale_x: float,
+    zp_x: int,
+    scale_w: float,
+    zp_w: int,
+) -> np.ndarray:
+    """Execute INT8 Fused Linear + ReLU."""
+    if _native is None or not hasattr(_native, "native_fused_qlinear_relu"):
+        raise RuntimeError("Native fused_qlinear_relu is not loaded.")
+
+    shape_x = _native.Shape(list(x_int8.shape))
+    shape_w = _native.Shape(list(w_int8.shape))
+
+    t_x = _native.Tensor(shape_x, _native.DType.Int8)
+    t_w = _native.Tensor(shape_w, _native.DType.Int8)
+
+    c_x = _ptr_to_numpy(t_x.storage().data_ptr(), x_int8.shape, np.int8)
+    c_w = _ptr_to_numpy(t_w.storage().data_ptr(), w_int8.shape, np.int8)
+    np.copyto(c_x, x_int8)
+    np.copyto(c_w, w_int8)
+
+    t_b = None
+    if b_arr is not None:
+        shape_b = _native.Shape(list(b_arr.shape))
+        t_b = _native.Tensor(shape_b, _native.DType.Float32)
+        c_b = _ptr_to_numpy(t_b.storage().data_ptr(), b_arr.shape, np.float32)
+        np.copyto(c_b, b_arr)
+
+    out_t = _native.native_fused_qlinear_relu(
+        t_x, t_w, t_b, float(scale_x), int(zp_x), float(scale_w), int(zp_w)
+    )
+    out_shape = (x_int8.shape[0], w_int8.shape[0])
+    return _ptr_to_numpy(out_t.storage().data_ptr(), out_shape, np.float32).copy()

@@ -1,84 +1,121 @@
 # TensorForge
 
-**TensorForge** is a memory-aware deep learning framework and high-performance inference engine built from first principles.
+**TensorForge** is a memory-aware deep learning framework and high-performance production inference engine built from first principles in Python and C++17.
 
 ---
 
-## Current Milestone: `v0.9 – Portable Inference Runtime & Model Export`
+## Current Milestone: `v1.0 – Production Inference Runtime & Operator Fusion`
 
-> **Development Status:** `v0.9 (Active Milestone)`
-> TensorForge v0.9 introduces a dedicated, high-performance **Portable Inference Runtime** (`tensorforge.inference.InferenceRuntime`) capable of loading serialized `.tfmodel` artifacts, automatically reconstructing network graphs, restoring FP32 and INT8 parameters, and executing predictions across NumPy and Native C++ acceleration backends without requiring the training or autograd stack.
+> **Development Status:** `v1.0 (Production Release)`
+> TensorForge v1.0 establishes a complete, production-grade **Inference Engine** with graph-level **Operator Fusion** (`InferenceRuntime.optimize()`). By collapsing multi-operation subgraphs into specialized single-pass native C++ compute kernels, v1.0 eliminates intermediate buffer allocations, maximizes CPU cache locality, and delivers significant latency and throughput improvements across both FP32 and INT8 low-precision workloads.
 
 ---
 
 ## Project Overview
 
-TensorForge provides explicit control over memory representation, tensor operations, automatic differentiation, neural network composition, model training, post-training quantization, and dedicated standalone inference execution.
+TensorForge provides end-to-end, first-principles implementations of tensor memory representation, automatic differentiation, neural network composition, model training, post-training quantization, serialization, and high-performance inference.
 
-In **v0.9**, TensorForge features:
-- Core multi-dimensional `Tensor` abstraction with contiguous physical storage.
-- Custom reverse-mode automatic differentiation DAG engine (`autograd`).
-- Neural network layers & activations (`Parameter`, `Module`, `Linear`, `ReLU`, `Sigmoid`, `Tanh`, `Softmax`, `MSELoss`, `CrossEntropyLoss`, `Sequential`).
-- Optimization & Training pipeline (`SGD`, `Adam`, `TensorDataset`, `DataLoader`, `Trainer`, `accuracy`).
-- **C++17 Native Runtime Subsystem (`native/`):**
-  - Aligned 64-byte `DefaultCPUAllocator` with active memory tracking.
+In **v1.0**, TensorForge includes:
+- **Core Tensor Abstraction (`tensorforge/tensor/`):** Contiguous physical memory buffers (`Storage`, `NumPyStorage`, `NativeStorage`), dynamic shape/stride utilities, broadcasting, and strong DType semantics.
+- **Autograd Engine (`tensorforge/autograd/`):** Custom reverse-mode automatic differentiation DAG engine with topological backpropagation, gradient accumulation, and context control (`no_grad()`, `detach()`, `zero_grad()`).
+- **Neural Network Library (`tensorforge/nn/`):** `Parameter`, `Module`, `Linear`, activation functions (`ReLU`, `Sigmoid`, `Tanh`, `Softmax`), loss criteria (`MSELoss`, `CrossEntropyLoss`), and containers (`Sequential`).
+- **Training Subsystem (`tensorforge/optim/`, `tensorforge/training/`, `tensorforge/data/`):** First-order optimizers (`SGD`, `Adam`), `TensorDataset`, `DataLoader`, and high-level `Trainer`.
+- **C++17 Native Acceleration Subsystem (`native/`):**
+  - 64-byte aligned `DefaultCPUAllocator` with active memory tracking.
   - Native C++ `Storage` with RAII memory lifetime ownership.
   - Native C++ `Tensor` and `Shape` representations preserving row-major contiguous layout.
   - Handcrafted CPU compute kernels: FP32 element-wise arithmetic, cache-aware FP32 matmul, and INT8 quantized matmul.
-- **Backend Dispatcher Subsystem (`tensorforge/backend/`):**
-  - Runtime backend selection (`"numpy"` vs `"native"`).
-  - Automatic fallback to NumPy when native kernels are not eligible.
-  - Seamless Python autograd backpropagation across both native and NumPy forward computations.
+  - **NEW in v1.0: Fused Forward Kernels:** `fused_linear`, `fused_linear_relu`, `fused_linear_sigmoid`, `fused_linear_tanh`, `fused_linear_softmax`, and INT8 `fused_qlinear_relu_int8`.
 - **Quantization & INT8 Inference Subsystem (`tensorforge/quantization/`):**
   - **`QuantizedTensor`:** Low-precision data structure storing contiguous INT8 physical memory alongside linear scale and zero-point parameters.
   - **Quantization Math:** Symmetric ($z=0$) and Asymmetric Affine quantization algorithms with numerical safety.
   - **Calibration Algorithms:** `MinMaxCalibrator`, `MovingAverageCalibrator`, and outlier-resistant `PercentileCalibrator`.
-  - **INT8 Compute Kernels:** `qmatmul` matrix multiplication with 32-bit integer accumulation to prevent overflow.
+  - **INT8 Compute Kernels:** `qmatmul` and `fused_qlinear_relu_int8` with 32-bit integer accumulation to prevent overflow.
 - **Model Serialization & Checkpointing Subsystem (`tensorforge/serialization/`):**
   - Safe `.tfmodel` and `.tfckpt` structured ZIP archives (**strictly avoiding `pickle`** for tensor storage).
   - In-place physical parameter loading preserving `Parameter` object identity and `requires_grad`.
   - Optimizer state persistence and training resumption.
-- **Portable Inference Runtime Subsystem (`tensorforge/inference/`):**
+- **Production Inference & Operator Fusion Subsystem (`tensorforge/inference/`):**
   - **`InferenceRuntime`:** Standalone prediction engine operating in `eval` mode with strict `no_grad` guarantees (zero backward graph allocation).
-  - **`ModelLoader`:** Automated architecture reconstitution from serialized `.tfmodel` metadata.
-  - **Multi-Backend Execution:** Seamless execution on either NumPy reference or accelerated Native C++ kernels.
-  - **INT8 Low-Precision Inference:** Direct execution of quantized models with 4x memory savings.
+  - **`InferenceGraph` & `OperatorFusionPass`:** Intermediate graph representation with pattern-matching operator fusion.
+  - **`GraphOptimizer`:** Execution pipeline with multi-backend dispatch and robust fallback guarantees.
 
 ---
 
-## Inference Runtime Architecture
+## Operator Fusion Architecture
 
 ```
-                            Serialized Artifact (.tfmodel)
-                                          │
-                                          ▼
-                                     ModelLoader
-                           (Reconstructs Layer Graph &
-                            Loads FP32/INT8 Parameters)
-                                          │
-                                          ▼
-                                  InferenceRuntime
-                            ├── Model in eval() Mode
-                            ├── no_grad() Execution Context
-                            └── Backend Dispatcher Link
-                                          │
-                        ┌─────────────────┴─────────────────┐
-                        ▼                                   ▼
-                 NumPy Backend                      Native C++ Backend
-            (Universal CPU Reference)             (qmatmul / matmul C++ Kernels)
-                        │                                   │
-                        └─────────────────┬─────────────────┘
-                                          │
-                                          ▼
-                             Prediction Output Tensor
-                         (requires_grad=False, grad_fn=None)
+                 Original Serialized Model (.tfmodel)
+                                  │
+                                  ▼
+                             ModelLoader
+                   (Reconstructs Layer Hierarchy)
+                                  │
+                                  ▼
+                           InferenceGraph
+                    ┌─────────────────────────┐
+                    │ [0] Linear (16 -> 32)   │
+                    │ [1] ReLU                │
+                    │ [2] Linear (32 -> 4)    │
+                    │ [3] Softmax (dim=-1)    │
+                    └─────────────────────────┘
+                                  │
+                                  ▼
+                         OperatorFusionPass
+                    (Collapses Adjacent Patterns)
+                                  │
+                                  ▼
+                      Optimized InferenceGraph
+                    ┌─────────────────────────┐
+                    │ [0] FusedLinear(ReLU)   │
+                    │ [1] FusedLinear(Softmax)│
+                    └─────────────────────────┘
+                                  │
+                                  ▼
+                          InferenceRuntime
+                                  │
+          ┌───────────────────────┴───────────────────────┐
+          ▼                                               ▼
+   Native C++ Backend                               NumPy Backend
+(fused_linear_relu, etc.)                     (Single-Pass Fused Reference)
+          │                                               │
+          └───────────────────────┬───────────────────────┘
+                                  │
+                                  ▼
+                     Prediction Output Tensor
+                (requires_grad=False, grad_fn=None)
+```
+
+---
+
+## Supported Fusion Patterns
+
+| Pattern | Source Layers | Fused Operator | Native Kernel |
+|---|---|---|---|
+| **Linear + ReLU** | `Linear(M, K)` $\to$ `ReLU()` | `FusedLinear(activation='relu')` | `native_fused_linear_relu` |
+| **Linear + Sigmoid** | `Linear(M, K)` $\to$ `Sigmoid()` | `FusedLinear(activation='sigmoid')` | `native_fused_linear_sigmoid` |
+| **Linear + Tanh** | `Linear(M, K)` $\to$ `Tanh()` | `FusedLinear(activation='tanh')` | `native_fused_linear_tanh` |
+| **Linear + Softmax** | `Linear(M, K)` $\to$ `Softmax()` | `FusedLinear(activation='softmax')` | `native_fused_linear_softmax` |
+| **Quantized Linear + ReLU** | `QuantizedLinear` $\to$ `ReLU()` | `FusedQuantizedLinear(ReLU)` | `native_fused_qlinear_relu` |
+
+---
+
+## Execution Fallback Hierarchy
+
+TensorForge guarantees deterministic execution with zero unhandled operation errors through an explicit 4-tier fallback hierarchy:
+
+```
+1. Fused Native C++     ──(if native extension loaded & operands eligible)──►
+2. Fused NumPy Reference──(if native unavailable / input requires fallback)──►
+3. Unfused Native C++   ──(if unoptimized & native backend selected)────────►
+4. Unfused NumPy        ──(universal base reference)────────────────────────►
 ```
 
 ---
 
 ## Inference Runtime Usage Examples
 
-### 1. Basic FP32 Inference
+### 1. Basic Model Loading & Graph Optimization
 
 ```python
 import tensorforge as tf
@@ -87,45 +124,53 @@ from tensorforge.inference import InferenceRuntime
 # 1. Load exported model artifact
 runtime = InferenceRuntime.load("classifier.tfmodel")
 
-# 2. Inspect runtime summary
-print(runtime.summary())
+# 2. Apply graph-level operator fusion
+runtime.optimize()
 
-# 3. Execute prediction on sample or batch
+# 3. Inspect optimization diagnostic summary
+summary = runtime.summary()
+print(f"Optimized: {summary['is_optimized']}")
+print(f"Collapsed: {summary['original_nodes']} -> {summary['optimized_nodes']} nodes")
+print(f"Fused Patterns: {summary['fused_patterns']}")
+
+# 4. Execute prediction on sample or batch
 x = tf.randn((8, runtime.input_shape[0]))
 predictions = runtime.predict(x)
 
-print("Predictions shape:", predictions.shape)
 assert predictions.requires_grad is False
+assert predictions.grad_fn is None
 ```
 
-### 2. Multi-Backend Inference Dispatch
+### 2. Multi-Backend Fused Inference
 
 ```python
 import tensorforge as tf
 from tensorforge.backend import backend_context
 from tensorforge.inference import InferenceRuntime
 
-runtime = InferenceRuntime.load("classifier.tfmodel")
+runtime = InferenceRuntime.load("classifier.tfmodel").optimize()
 x = tf.randn((16, runtime.input_shape[0]))
 
-# Run with NumPy Backend
+# Run with NumPy Fused Backend
 with backend_context("numpy"):
     out_np = runtime.predict(x)
 
-# Run with Native C++ Fast Path (if available)
+# Run with Native C++ Fused Fast Path
 with backend_context("native"):
     out_native = runtime.predict(x)
 ```
 
-### 3. INT8 Quantized Model Inference
+### 3. INT8 Low-Precision Fused Inference
 
 ```python
 from tensorforge.inference import InferenceRuntime
 
-# Load quantized model
-runtime_int8 = InferenceRuntime.load("quantized_classifier.tfmodel")
+# Load quantized model and optimize
+runtime_int8 = InferenceRuntime.load("quantized_classifier.tfmodel").optimize()
 
 print(f"Is Quantized: {runtime_int8.is_quantized}")
+print(f"Is Optimized: {runtime_int8.is_optimized}")
+
 output = runtime_int8.predict(x)
 ```
 
@@ -134,16 +179,16 @@ output = runtime_int8.predict(x)
 ## Running Benchmarks & Demonstrations
 
 ```bash
-# Inference runtime demonstration
+# Production inference & operator fusion demonstration
 python examples/inference_demo.py
 
-# Inference performance benchmark (Latency & Throughput)
+# Inference performance benchmark (NumPy Unfused vs Native Unfused vs Native Fused)
 python benchmarks/benchmark_inference.py
 
-# Serialization demonstration
+# Model serialization demonstration
 python examples/serialization_demo.py
 
-# Quantization demonstration
+# INT8 Quantization demonstration
 python examples/quantization_demo.py
 ```
 
@@ -153,37 +198,49 @@ python examples/quantization_demo.py
 
 ```
 TensorForge/
-├── native/                          # Native C++17 Runtime
+├── native/                          # Native C++17 Runtime Subsystem
 │   ├── CMakeLists.txt               # CMake build configuration
-│   ├── include/tensorforge/         # Public C++ headers (dtype, shape, allocator, storage, tensor, kernels)
-│   ├── src/                         # Native C++ implementations & pybind11 bindings
+│   ├── include/tensorforge/         # Public C++ headers
+│   │   ├── allocator.hpp            # 64-byte aligned CPU allocator
+│   │   ├── dtype.hpp                # DType enum & traits
+│   │   ├── kernels.hpp              # Unfused & Fused inference kernels
+│   │   ├── shape.hpp                # Shape & contiguous stride math
+│   │   ├── storage.hpp              # Native Storage buffer
+│   │   └── tensor.hpp               # Native Tensor abstraction
+│   ├── src/                         # Native implementations & pybind11 bindings
+│   │   ├── allocator.cpp
+│   │   ├── bindings.cpp             # pybind11 module bindings
+│   │   ├── dtype.cpp
+│   │   ├── kernels.cpp              # Handcrafted SIMD-friendly compute kernels
+│   │   ├── shape.cpp
+│   │   ├── storage.cpp
+│   │   └── tensor.cpp
 │   └── tests/
 │       └── test_native.cpp          # Standalone C++ test suite
 │
 ├── tensorforge/
-│   ├── __init__.py                  # Top-level exports & version (0.9.0)
-│   ├── inference/                   # NEW: Portable Inference Runtime Subsystem
-│   │   ├── __init__.py              # Public inference exports (InferenceRuntime, ModelLoader)
-│   │   ├── runtime.py               # Standalone InferenceRuntime execution engine
-│   │   └── loader.py                # ModelLoader & dynamic architecture reconstitution
-│   ├── serialization/               # Model Serialization & Checkpointing Subsystem
-│   │   ├── format.py                # Safe structured ZIP container (.tfmodel, .tfckpt)
-│   │   └── checkpoint.py            # save_model, load_model, save_checkpoint, load_checkpoint
-│   ├── quantization/                # Quantization & INT8 Inference Subsystem
-│   │   ├── quantized_tensor.py      # QuantizedTensor data structure
-│   │   ├── quantize.py              # quantize, dequantize, qmatmul
-│   │   ├── calibration.py           # MinMax, MovingAverage, Percentile calibrators
-│   │   └── metrics.py               # MAE, Max Error, MSE, Relative Error, SQNR
-│   ├── backend/                     # Backend Dispatcher Subsystem
-│   ├── optim/                       # Optimizer subsystem (SGD, Adam with state_dict)
-│   ├── nn/                          # Neural Network subsystem (Module, Linear, Sequential, etc.)
+│   ├── __init__.py                  # Top-level exports & version (1.0.0)
+│   ├── inference/                   # Production Inference & Operator Fusion Subsystem
+│   │   ├── __init__.py              # Public inference exports
+│   │   ├── graph.py                 # InferenceGraph and InferenceNode representations
+│   │   ├── fusion.py                # OperatorFusionPass pattern matching engine
+│   │   ├── optimizer.py             # GraphOptimizer execution dispatcher
+│   │   ├── runtime.py               # InferenceRuntime engine
+│   │   └── loader.py                # ModelLoader & architecture reconstitution
+│   ├── serialization/               # Model Serialization Subsystem (.tfmodel, .tfckpt)
+│   ├── quantization/                # Quantization Subsystem (INT8, Calibration, qmatmul)
+│   ├── backend/                     # Multi-backend Dispatcher Subsystem
+│   ├── optim/                       # Optimizer subsystem (SGD, Adam)
+│   ├── nn/                          # Neural Network subsystem (Linear, Sequential, etc.)
 │   ├── autograd/                    # Automatic Differentiation DAG engine
 │   ├── tensor/                      # Core Tensor subsystem
-│   └── utils/
-│       └── validation.py            # Custom exception hierarchy
+│   └── utils/                       # Validation & Exception hierarchy
 │
 ├── tests/                           # Python Test Suite
-│   ├── inference/                   # NEW: Inference runtime test suite
+│   ├── inference/                   # Inference & Fusion test suite
+│   │   ├── test_fusion.py           # Pattern matching and node collapsing tests
+│   │   ├── test_fused_correctness.py# Fused vs unfused mathematical parity tests
+│   │   ├── test_fused_backend_dispatch.py # Multi-backend execution tests
 │   │   ├── test_loader.py
 │   │   ├── test_runtime.py
 │   │   ├── test_fp32_inference.py
@@ -198,13 +255,13 @@ TensorForge/
 │   └── optim/
 │
 ├── examples/                        # Demonstrations
-│   ├── inference_demo.py            # NEW: Standalone inference runtime demo
+│   ├── inference_demo.py            # End-to-end production inference & fusion demo
 │   ├── serialization_demo.py
 │   ├── quantization_demo.py
 │   └── training_demo.py
 │
-├── benchmarks/                      # Benchmarks
-│   ├── benchmark_inference.py       # NEW: Inference latency and throughput benchmark
+├── benchmarks/                      # Performance Benchmarks
+│   ├── benchmark_inference.py       # Latency, throughput, and speedup benchmark
 │   ├── benchmark_quantization.py
 │   └── benchmark_matmul.py
 │
@@ -227,5 +284,5 @@ TensorForge/
 | **v0.6 – Native Operation Dispatch & Runtime Integration** | **Complete** | Backend dispatcher, runtime backend switching, automatic NumPy fallback, autograd integration |
 | **v0.7 – Quantization Runtime & INT8 Inference** | **Complete** | QuantizedTensor, symmetric & asymmetric INT8 quantization, calibration, INT8 matmul, error metrics |
 | **v0.8 – Model Serialization & Checkpointing** | **Complete** | Safe .tfmodel & .tfckpt formats, state_dict, optimizer state persistence, training resumption |
-| **v0.9 – Portable Inference Runtime & Model Export** | **Current** | Dedicated InferenceRuntime, ModelLoader, zero-code architecture reconstitution, multi-backend dispatch |
-| **v1.0 – Production Inference Engine & Operator Fusion** | Planned | Graph execution engine, operator fusion (Linear+ReLU), batching queue, C/C++ embedding API |
+| **v0.9 – Portable Inference Runtime & Model Export** | **Complete** | Dedicated InferenceRuntime, ModelLoader, zero-code architecture reconstitution, multi-backend dispatch |
+| **v1.0 – Production Inference Engine & Operator Fusion** | **Complete** | InferenceGraph, OperatorFusionPass, native fused C++ kernels, multi-backend fallback, production release |

@@ -116,4 +116,86 @@ PYBIND11_MODULE(_tensorforge_native, m) {
         return out;
     }, py::arg("in"), py::arg("scale"), py::arg("zero_point") = 0,
        "Quantize Float32 tensor to INT8");
+
+    // ========================================================================
+    // TensorForge v1.0: Fused Forward Operators
+    // ========================================================================
+
+    m.def("native_fused_linear", [](
+        const Tensor& x,
+        const Tensor& weight,
+        const Tensor* bias = nullptr
+    ) {
+        Shape out_shape({x.shape()[0], weight.shape()[0]});
+        Tensor out = Tensor::empty(out_shape, DType::Float32);
+        kernels::fused_linear(x, weight, bias, out);
+        return out;
+    }, py::arg("x"), py::arg("weight"), py::arg("bias") = nullptr,
+       "Fused Linear: out = x @ weight.T + bias");
+
+    m.def("native_fused_linear_relu", [](
+        const Tensor& x,
+        const Tensor& weight,
+        const Tensor* bias = nullptr
+    ) {
+        Shape out_shape({x.shape()[0], weight.shape()[0]});
+        Tensor out = Tensor::empty(out_shape, DType::Float32);
+        kernels::fused_linear_relu(x, weight, bias, out);
+        return out;
+    }, py::arg("x"), py::arg("weight"), py::arg("bias") = nullptr,
+       "Fused Linear + ReLU: out = max(0, x @ weight.T + bias)");
+
+    m.def("native_fused_linear_sigmoid", [](
+        const Tensor& x,
+        const Tensor& weight,
+        const Tensor* bias = nullptr
+    ) {
+        Shape out_shape({x.shape()[0], weight.shape()[0]});
+        Tensor out = Tensor::empty(out_shape, DType::Float32);
+        kernels::fused_linear_sigmoid(x, weight, bias, out);
+        return out;
+    }, py::arg("x"), py::arg("weight"), py::arg("bias") = nullptr,
+       "Fused Linear + Sigmoid: out = 1 / (1 + exp(-(x @ weight.T + bias)))");
+
+    m.def("native_fused_linear_tanh", [](
+        const Tensor& x,
+        const Tensor& weight,
+        const Tensor* bias = nullptr
+    ) {
+        Shape out_shape({x.shape()[0], weight.shape()[0]});
+        Tensor out = Tensor::empty(out_shape, DType::Float32);
+        kernels::fused_linear_tanh(x, weight, bias, out);
+        return out;
+    }, py::arg("x"), py::arg("weight"), py::arg("bias") = nullptr,
+       "Fused Linear + Tanh: out = tanh(x @ weight.T + bias)");
+
+    m.def("native_fused_linear_softmax", [](
+        const Tensor& x,
+        const Tensor& weight,
+        const Tensor* bias = nullptr,
+        int64_t dim = -1
+    ) {
+        Shape out_shape({x.shape()[0], weight.shape()[0]});
+        Tensor out = Tensor::empty(out_shape, DType::Float32);
+        kernels::fused_linear_softmax(x, weight, bias, out, dim);
+        return out;
+    }, py::arg("x"), py::arg("weight"), py::arg("bias") = nullptr, py::arg("dim") = -1,
+       "Fused Linear + Softmax: out = softmax(x @ weight.T + bias, dim=-1)");
+
+    m.def("native_fused_qlinear_relu", [](
+        const Tensor& x_q,
+        const Tensor& weight_q,
+        const Tensor* bias,
+        float scale_x,
+        int32_t zp_x,
+        float scale_w,
+        int32_t zp_w
+    ) {
+        Shape out_shape({x_q.shape()[0], weight_q.shape()[0]});
+        Tensor out = Tensor::empty(out_shape, DType::Float32);
+        kernels::fused_qlinear_relu_int8(x_q, weight_q, bias, out, scale_x, zp_x, scale_w, zp_w);
+        return out;
+    }, py::arg("x_q"), py::arg("weight_q"), py::arg("bias") = nullptr,
+       py::arg("scale_x") = 1.0f, py::arg("zp_x") = 0, py::arg("scale_w") = 1.0f, py::arg("zp_w") = 0,
+       "Fused Quantized INT8 Linear + ReLU");
 }

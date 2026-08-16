@@ -1,13 +1,15 @@
-"""Dedicated Inference Runtime for executing TensorForge models without training overhead."""
+"""Dedicated Production Inference Runtime for executing TensorForge models with Operator Fusion."""
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 import numpy as np
 
 from tensorforge.autograd.engine import no_grad
 from tensorforge.backend.dispatcher import backend_context, get_backend, get_last_backend, set_backend
+from tensorforge.inference.graph import InferenceGraph
 from tensorforge.inference.loader import ModelLoader
+from tensorforge.inference.optimizer import GraphOptimizer
 from tensorforge.nn.linear import Linear
 from tensorforge.nn.module import Module
 from tensorforge.nn.sequential import Sequential
@@ -19,10 +21,11 @@ from tensorforge.utils.validation import TensorForgeError
 
 
 class InferenceRuntime:
-    """A high-performance, standalone inference execution engine for TensorForge models.
+    """A production-grade, standalone inference engine for TensorForge models.
 
     Loads serialized .tfmodel artifacts, reconstructs the network graph, restores weights,
-    and executes forward predictions in eval mode with no_grad guarantees across CPU NumPy
+    supports graph-level operator fusion (e.g. Linear+ReLU, Linear+Sigmoid, Linear+Tanh, Linear+Softmax),
+    and executes forward predictions in eval mode with strict no_grad guarantees across CPU NumPy
     and Native C++ acceleration backends.
 
     Args:
@@ -48,6 +51,17 @@ class InferenceRuntime:
         self._backend: Optional[str] = backend
 
         self._model.eval()
+
+        # Graph optimization state
+        self._graph: InferenceGraph = InferenceGraph.from_module(self._model, self._state_dict)
+        self._optimized_graph: Optional[InferenceGraph] = None
+        self._is_optimized: bool = False
+        self._optimization_stats: Dict[str, Any] = {
+            "original_nodes": len(self._graph),
+            "optimized_nodes": len(self._graph),
+            "fused_count": 0,
+            "fused_patterns": [],
+        }
 
         # Infer input and output dimensions
         self._input_shape: Optional[Tuple[int, ...]] = None
@@ -92,6 +106,49 @@ class InferenceRuntime:
             state_dict=state_dict,
             backend=backend,
         )
+
+    def optimize(self) -> InferenceRuntime:
+        """Perform graph-level operator fusion and kernel optimizations.
+
+        Identifies and collapses fusible layers (Linear+ReLU, Linear+Sigmoid,
+        Linear+Tanh, Linear+Softmax) into high-performance fused execution nodes.
+
+        Returns:
+            Self (enables method chaining).
+        """
+        self._optimized_graph, self._optimization_stats = GraphOptimizer.optimize(self._graph)
+        self._is_optimized = True
+        return self
+
+    @property
+    def is_optimized(self) -> bool:
+        """Whether operator fusion optimizations are active."""
+        return self._is_optimized
+
+    @property
+    def graph(self) -> InferenceGraph:
+        """Access the active (optimized or unoptimized) computation graph."""
+        return self._optimized_graph if self._is_optimized and self._optimized_graph is not None else self._graph
+
+    @property
+    def fused_count(self) -> int:
+        """Number of fused operator sequences in the optimized graph."""
+        return int(self._optimization_stats.get("fused_count", 0))
+
+    @property
+    def fused_patterns(self) -> List[str]:
+        """List of fused operator pattern names."""
+        return list(self._optimization_stats.get("fused_patterns", []))
+
+    @property
+    def original_node_count(self) -> int:
+        """Number of nodes in the original unoptimized graph."""
+        return int(self._optimization_stats.get("original_nodes", len(self._graph)))
+
+    @property
+    def optimized_node_count(self) -> int:
+        """Number of nodes in the optimized graph."""
+        return int(self._optimization_stats.get("optimized_nodes", len(self.graph)))
 
     @property
     def model(self) -> Module:
@@ -148,7 +205,14 @@ class InferenceRuntime:
         target_backend = self.backend
         with backend_context(target_backend):
             with no_grad():
-                if self._is_quantized:
+                if self._is_optimized and self._optimized_graph is not None:
+                    output = GraphOptimizer.execute(
+                        self._optimized_graph,
+                        x,
+                        backend=target_backend,
+                        is_quantized=self._is_quantized,
+                    )
+                elif self._is_quantized:
                     output = self._predict_quantized(x)
                 else:
                     output = self._model(x)
@@ -163,7 +227,7 @@ class InferenceRuntime:
         return self.predict(batch_data)
 
     def _predict_quantized(self, x: Tensor) -> Tensor:
-        """Execute quantized INT8 forward inference path."""
+        """Execute quantized INT8 forward inference path (unfused fallback)."""
         current: Tensor = x
 
         if isinstance(self._model, Sequential):
@@ -208,8 +272,8 @@ class InferenceRuntime:
         """Generate a diagnostic summary of the loaded model and runtime environment.
 
         Returns:
-            Dictionary with architecture details, parameter counts, memory consumption,
-            backend configuration, and input/output shapes.
+            Dictionary with architecture details, graph optimization status,
+            parameter counts, memory consumption, and backend configuration.
         """
         from tensorforge.serialization.checkpoint import compute_model_size
 
@@ -219,23 +283,28 @@ class InferenceRuntime:
             "model_type": type(self._model).__name__,
             "architecture": repr(self._model),
             "is_quantized": self._is_quantized,
+            "is_optimized": self._is_optimized,
             "backend": self.backend,
             "last_dispatch": get_last_backend(),
             "input_shape": self._input_shape,
             "output_shape": self._output_shape,
+            "original_nodes": self.original_node_count,
+            "optimized_nodes": self.optimized_node_count,
+            "fused_count": self.fused_count,
+            "fused_patterns": self.fused_patterns,
             "num_parameters": size_stats["num_parameters"],
             "total_bytes": size_stats["total_bytes"],
             "size_kb": size_stats["size_kb"],
             "format_version": self._metadata.get("format_version", "1.0"),
-            "tensorforge_version": self._metadata.get("tensorforge_version", "0.9.0"),
+            "tensorforge_version": "1.0.0",
         }
 
     def __repr__(self) -> str:
-        q_str = " (INT8 Quantized)" if self._is_quantized else ""
+        opt_str = f", optimized={self._is_optimized} ({self.fused_count} fused)" if self._is_optimized else ""
         return (
             f"InferenceRuntime(\n"
             f"  backend='{self.backend}',\n"
-            f"  is_quantized={self._is_quantized},\n"
+            f"  is_quantized={self._is_quantized}{opt_str},\n"
             f"  input_shape={self._input_shape},\n"
             f"  output_shape={self._output_shape},\n"
             f"  model={repr(self._model)}\n"

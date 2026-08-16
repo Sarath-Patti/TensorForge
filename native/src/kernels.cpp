@@ -32,6 +32,45 @@ void validate_scalar_float32(const Tensor& a, const Tensor& out, const char* op_
     }
 }
 
+void validate_fused_linear_operands(
+    const Tensor& x,
+    const Tensor& weight,
+    const Tensor* bias,
+    const Tensor& out,
+    const char* op_name
+) {
+    if (x.ndim() != 2 || weight.ndim() != 2 || out.ndim() != 2) {
+        throw std::invalid_argument(std::string(op_name) + " requires 2D matrices for input, weight, and output");
+    }
+    if (x.dtype() != DType::Float32 || weight.dtype() != DType::Float32 || out.dtype() != DType::Float32) {
+        throw std::invalid_argument(std::string(op_name) + " requires Float32 dtype for all operands");
+    }
+
+    const int64_t M = x.shape()[0];
+    const int64_t K = x.shape()[1];
+    const int64_t N = weight.shape()[0];
+    const int64_t Kw = weight.shape()[1];
+
+    if (K != Kw) {
+        throw std::invalid_argument(std::string(op_name) + " feature dimension mismatch: x has " +
+                                    std::to_string(K) + " features, but weight expects " + std::to_string(Kw));
+    }
+    if (out.shape()[0] != M || out.shape()[1] != N) {
+        throw std::invalid_argument(std::string(op_name) + " output shape mismatch: expected (" +
+                                    std::to_string(M) + ", " + std::to_string(N) + "), got (" +
+                                    std::to_string(out.shape()[0]) + ", " + std::to_string(out.shape()[1]) + ")");
+    }
+    if (bias != nullptr && bias->numel() > 0) {
+        if (bias->dtype() != DType::Float32) {
+            throw std::invalid_argument(std::string(op_name) + " bias must have Float32 dtype");
+        }
+        if (bias->numel() != N) {
+            throw std::invalid_argument(std::string(op_name) + " bias length (" + std::to_string(bias->numel()) +
+                                        ") must match out_features (" + std::to_string(N) + ")");
+        }
+    }
+}
+
 } // anonymous namespace
 
 void add(const Tensor& a, const Tensor& b, Tensor& out) {
@@ -237,6 +276,248 @@ void quantize_float32(const Tensor& in, Tensor& out, float scale, int32_t zero_p
         float q_val = std::round(in_ptr[i] * inv_scale) + zp_f;
         q_val = std::max(-128.0f, std::min(127.0f, q_val));
         out_ptr[i] = static_cast<int8_t>(q_val);
+    }
+}
+
+// ============================================================================
+// TensorForge v1.0: Fused Forward Implementations
+// ============================================================================
+
+void fused_linear(
+    const Tensor& x,
+    const Tensor& weight,
+    const Tensor* bias,
+    Tensor& out
+) {
+    validate_fused_linear_operands(x, weight, bias, out, "fused_linear");
+
+    const int64_t M = x.shape()[0];
+    const int64_t K = x.shape()[1];
+    const int64_t N = weight.shape()[0];
+
+    const float* X = x.data_ptr<float>();
+    const float* W = weight.data_ptr<float>();
+    const float* B = (bias != nullptr && bias->numel() > 0) ? bias->data_ptr<float>() : nullptr;
+    float* OUT = out.data_ptr<float>();
+
+    for (int64_t i = 0; i < M; ++i) {
+        const float* x_row = X + i * K;
+        float* out_row = OUT + i * N;
+
+        for (int64_t j = 0; j < N; ++j) {
+            float acc = (B != nullptr) ? B[j] : 0.0f;
+            const float* w_row = W + j * K;
+            for (int64_t k = 0; k < K; ++k) {
+                acc += x_row[k] * w_row[k];
+            }
+            out_row[j] = acc;
+        }
+    }
+}
+
+void fused_linear_relu(
+    const Tensor& x,
+    const Tensor& weight,
+    const Tensor* bias,
+    Tensor& out
+) {
+    validate_fused_linear_operands(x, weight, bias, out, "fused_linear_relu");
+
+    const int64_t M = x.shape()[0];
+    const int64_t K = x.shape()[1];
+    const int64_t N = weight.shape()[0];
+
+    const float* X = x.data_ptr<float>();
+    const float* W = weight.data_ptr<float>();
+    const float* B = (bias != nullptr && bias->numel() > 0) ? bias->data_ptr<float>() : nullptr;
+    float* OUT = out.data_ptr<float>();
+
+    for (int64_t i = 0; i < M; ++i) {
+        const float* x_row = X + i * K;
+        float* out_row = OUT + i * N;
+
+        for (int64_t j = 0; j < N; ++j) {
+            float acc = (B != nullptr) ? B[j] : 0.0f;
+            const float* w_row = W + j * K;
+            for (int64_t k = 0; k < K; ++k) {
+                acc += x_row[k] * w_row[k];
+            }
+            out_row[j] = std::max(0.0f, acc);
+        }
+    }
+}
+
+void fused_linear_sigmoid(
+    const Tensor& x,
+    const Tensor& weight,
+    const Tensor* bias,
+    Tensor& out
+) {
+    validate_fused_linear_operands(x, weight, bias, out, "fused_linear_sigmoid");
+
+    const int64_t M = x.shape()[0];
+    const int64_t K = x.shape()[1];
+    const int64_t N = weight.shape()[0];
+
+    const float* X = x.data_ptr<float>();
+    const float* W = weight.data_ptr<float>();
+    const float* B = (bias != nullptr && bias->numel() > 0) ? bias->data_ptr<float>() : nullptr;
+    float* OUT = out.data_ptr<float>();
+
+    for (int64_t i = 0; i < M; ++i) {
+        const float* x_row = X + i * K;
+        float* out_row = OUT + i * N;
+
+        for (int64_t j = 0; j < N; ++j) {
+            float acc = (B != nullptr) ? B[j] : 0.0f;
+            const float* w_row = W + j * K;
+            for (int64_t k = 0; k < K; ++k) {
+                acc += x_row[k] * w_row[k];
+            }
+            out_row[j] = 1.0f / (1.0f + std::exp(-acc));
+        }
+    }
+}
+
+void fused_linear_tanh(
+    const Tensor& x,
+    const Tensor& weight,
+    const Tensor* bias,
+    Tensor& out
+) {
+    validate_fused_linear_operands(x, weight, bias, out, "fused_linear_tanh");
+
+    const int64_t M = x.shape()[0];
+    const int64_t K = x.shape()[1];
+    const int64_t N = weight.shape()[0];
+
+    const float* X = x.data_ptr<float>();
+    const float* W = weight.data_ptr<float>();
+    const float* B = (bias != nullptr && bias->numel() > 0) ? bias->data_ptr<float>() : nullptr;
+    float* OUT = out.data_ptr<float>();
+
+    for (int64_t i = 0; i < M; ++i) {
+        const float* x_row = X + i * K;
+        float* out_row = OUT + i * N;
+
+        for (int64_t j = 0; j < N; ++j) {
+            float acc = (B != nullptr) ? B[j] : 0.0f;
+            const float* w_row = W + j * K;
+            for (int64_t k = 0; k < K; ++k) {
+                acc += x_row[k] * w_row[k];
+            }
+            out_row[j] = std::tanh(acc);
+        }
+    }
+}
+
+void fused_linear_softmax(
+    const Tensor& x,
+    const Tensor& weight,
+    const Tensor* bias,
+    Tensor& out,
+    int64_t /*dim*/
+) {
+    validate_fused_linear_operands(x, weight, bias, out, "fused_linear_softmax");
+
+    const int64_t M = x.shape()[0];
+    const int64_t K = x.shape()[1];
+    const int64_t N = weight.shape()[0];
+
+    const float* X = x.data_ptr<float>();
+    const float* W = weight.data_ptr<float>();
+    const float* B = (bias != nullptr && bias->numel() > 0) ? bias->data_ptr<float>() : nullptr;
+    float* OUT = out.data_ptr<float>();
+
+    for (int64_t i = 0; i < M; ++i) {
+        const float* x_row = X + i * K;
+        float* out_row = OUT + i * N;
+
+        // 1. Matrix multiplication + bias accumulation
+        float max_val = -1e30f;
+        for (int64_t j = 0; j < N; ++j) {
+            float acc = (B != nullptr) ? B[j] : 0.0f;
+            const float* w_row = W + j * K;
+            for (int64_t k = 0; k < K; ++k) {
+                acc += x_row[k] * w_row[k];
+            }
+            out_row[j] = acc;
+            if (acc > max_val) {
+                max_val = acc;
+            }
+        }
+
+        // 2. Exponentiation with numerical stability shift
+        float sum_exp = 0.0f;
+        for (int64_t j = 0; j < N; ++j) {
+            float exp_val = std::exp(out_row[j] - max_val);
+            out_row[j] = exp_val;
+            sum_exp += exp_val;
+        }
+
+        // 3. Normalization
+        const float inv_sum = (sum_exp > 0.0f) ? (1.0f / sum_exp) : 1.0f;
+        for (int64_t j = 0; j < N; ++j) {
+            out_row[j] *= inv_sum;
+        }
+    }
+}
+
+void fused_qlinear_relu_int8(
+    const Tensor& x_q,
+    const Tensor& weight_q,
+    const Tensor* bias,
+    Tensor& out,
+    float scale_x,
+    int32_t zp_x,
+    float scale_w,
+    int32_t zp_w
+) {
+    if (x_q.ndim() != 2 || weight_q.ndim() != 2 || out.ndim() != 2) {
+        throw std::invalid_argument("fused_qlinear_relu_int8 requires 2D matrices");
+    }
+    if (x_q.dtype() != DType::Int8 || weight_q.dtype() != DType::Int8 || out.dtype() != DType::Float32) {
+        throw std::invalid_argument("fused_qlinear_relu_int8 requires Int8 inputs and Float32 output");
+    }
+
+    const int64_t M = x_q.shape()[0];
+    const int64_t K = x_q.shape()[1];
+    const int64_t N = weight_q.shape()[0];
+    const int64_t Kw = weight_q.shape()[1];
+
+    if (K != Kw) {
+        throw std::invalid_argument("fused_qlinear_relu_int8 dimension mismatch: K=" + std::to_string(K) +
+                                    ", Kw=" + std::to_string(Kw));
+    }
+    if (out.shape()[0] != M || out.shape()[1] != N) {
+        throw std::invalid_argument("fused_qlinear_relu_int8 output shape mismatch");
+    }
+
+    const int8_t* X = x_q.data_ptr<int8_t>();
+    const int8_t* W = weight_q.data_ptr<int8_t>();
+    const float* B = (bias != nullptr && bias->numel() > 0) ? bias->data_ptr<float>() : nullptr;
+    float* OUT = out.data_ptr<float>();
+
+    const float combined_scale = scale_x * scale_w;
+
+    for (int64_t i = 0; i < M; ++i) {
+        const int8_t* x_row = X + i * K;
+        float* out_row = OUT + i * N;
+
+        for (int64_t j = 0; j < N; ++j) {
+            float b_val = (B != nullptr) ? B[j] : 0.0f;
+            const int8_t* w_row = W + j * K;
+            int32_t acc_int = 0;
+
+            for (int64_t k = 0; k < K; ++k) {
+                const int32_t x_val = static_cast<int32_t>(x_row[k]) - zp_x;
+                const int32_t w_val = static_cast<int32_t>(w_row[k]) - zp_w;
+                acc_int += x_val * w_val;
+            }
+
+            float val = static_cast<float>(acc_int) * combined_scale + b_val;
+            out_row[j] = std::max(0.0f, val);
+        }
     }
 }
 

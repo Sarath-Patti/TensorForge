@@ -43,9 +43,6 @@ void mul_scalar(const Tensor& a, float scalar, Tensor& out);
  *   b: (K, N)
  *   out: (M, N)
  * 
- * Loop order: (i, k, j) or tiled block algorithm ensuring optimal sequential access
- * on the inner loop over b and out.
- * 
  * @param a Input matrix (M, K).
  * @param b Input matrix (K, N).
  * @param out Output matrix (M, N).
@@ -93,6 +90,81 @@ void dequantize_int8(const Tensor& in, Tensor& out, float scale, int32_t zero_po
  * @param zero_point Quantization zero-point offset.
  */
 void quantize_float32(const Tensor& in, Tensor& out, float scale, int32_t zero_point);
+
+// ============================================================================
+// TensorForge v1.0: Fused Inference Operators
+// ============================================================================
+
+/**
+ * @brief Fused Linear forward: out = x @ weight.T + bias.
+ * 
+ * @param x Input tensor of shape (M, K).
+ * @param weight Weight matrix of shape (N, K).
+ * @param bias Optional bias vector of shape (N,) or nullptr.
+ * @param out Output tensor of shape (M, N).
+ */
+void fused_linear(
+    const Tensor& x,
+    const Tensor& weight,
+    const Tensor* bias,
+    Tensor& out
+);
+
+/**
+ * @brief Fused Linear + ReLU forward: out = max(0, x @ weight.T + bias).
+ */
+void fused_linear_relu(
+    const Tensor& x,
+    const Tensor& weight,
+    const Tensor* bias,
+    Tensor& out
+);
+
+/**
+ * @brief Fused Linear + Sigmoid forward: out = 1 / (1 + exp(-(x @ weight.T + bias))).
+ */
+void fused_linear_sigmoid(
+    const Tensor& x,
+    const Tensor& weight,
+    const Tensor* bias,
+    Tensor& out
+);
+
+/**
+ * @brief Fused Linear + Tanh forward: out = tanh(x @ weight.T + bias).
+ */
+void fused_linear_tanh(
+    const Tensor& x,
+    const Tensor& weight,
+    const Tensor* bias,
+    Tensor& out
+);
+
+/**
+ * @brief Fused Linear + Softmax forward: out = softmax(x @ weight.T + bias, dim=-1).
+ */
+void fused_linear_softmax(
+    const Tensor& x,
+    const Tensor& weight,
+    const Tensor* bias,
+    Tensor& out,
+    int64_t dim = -1
+);
+
+/**
+ * @brief Fused Quantized INT8 Linear + ReLU forward with Float32 output:
+ *   out = max(0, qmatmul(x_q, weight_q.T) + bias).
+ */
+void fused_qlinear_relu_int8(
+    const Tensor& x_q,
+    const Tensor& weight_q,
+    const Tensor* bias,
+    Tensor& out,
+    float scale_x,
+    int32_t zp_x,
+    float scale_w,
+    int32_t zp_w
+);
 
 } // namespace kernels
 } // namespace tensorforge
