@@ -19,6 +19,7 @@ set(NATIVE_SOURCES
     src/shape.cpp
     src/allocator.cpp
     src/storage.cpp
+    src/arena.cpp
     src/tensor.cpp
     src/kernels.cpp
 )

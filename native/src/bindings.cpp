@@ -2,6 +2,7 @@
 #include <pybind11/stl.h>
 
 #include "tensorforge/allocator.hpp"
+#include "tensorforge/arena.hpp"
 #include "tensorforge/dtype.hpp"
 #include "tensorforge/kernels.hpp"
 #include "tensorforge/shape.hpp"
@@ -48,6 +49,16 @@ PYBIND11_MODULE(_tensorforge_native, m) {
         .def("data_ptr", &Storage::data_ptr)
         .def("fill_zeros", &Storage::fill_zeros)
         .def("fill_ones", &Storage::fill_ones);
+
+    py::class_<WorkspaceArena>(m, "WorkspaceArena")
+        .def(py::init<size_t>(), py::arg("initial_capacity_bytes") = 0)
+        .def("reserve", &WorkspaceArena::reserve, py::arg("num_bytes"))
+        .def("reset", &WorkspaceArena::reset)
+        .def("allocate_slice", &WorkspaceArena::allocate_slice, py::arg("num_bytes"), py::arg("alignment") = 64)
+        .def("data_ptr", &WorkspaceArena::data_ptr)
+        .def("capacity_bytes", &WorkspaceArena::capacity_bytes)
+        .def("used_bytes", &WorkspaceArena::used_bytes)
+        .def("is_allocated", &WorkspaceArena::is_allocated);
 
     py::class_<Tensor>(m, "Tensor")
         .def(py::init<Shape, DType>(), py::arg("shape"), py::arg("dtype") = DType::Float32)

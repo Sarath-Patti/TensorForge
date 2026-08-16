@@ -9,12 +9,19 @@ from tensorforge.backend.dispatcher import (
     set_backend,
 )
 from tensorforge.inference import (
+    CompiledPlanCache,
+    ExecutionPlan,
+    ExecutionStep,
     GraphOptimizer,
+    InferenceCompiler,
     InferenceGraph,
     InferenceNode,
     InferenceRuntime,
+    MemoryPlanner,
     ModelLoader,
     OperatorFusionPass,
+    PlannedBuffer,
+    ShapePropagator,
 )
 from tensorforge.quantization import (
     QuantizedTensor,
@@ -93,7 +100,7 @@ from tensorforge.utils.validation import (
     TensorForgeError,
 )
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 __all__ = [
     "__version__",
@@ -116,13 +123,20 @@ __all__ = [
     "randn",
     "arange",
     "from_numpy",
-    # Inference Runtime & Operator Fusion
+    # Inference Compiler, Planning & Runtime
     "InferenceRuntime",
     "ModelLoader",
     "InferenceGraph",
     "InferenceNode",
     "OperatorFusionPass",
     "GraphOptimizer",
+    "InferenceCompiler",
+    "ExecutionPlan",
+    "ExecutionStep",
+    "MemoryPlanner",
+    "PlannedBuffer",
+    "ShapePropagator",
+    "CompiledPlanCache",
     # Serialization
     "save_model",
     "load_model",

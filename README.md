@@ -4,172 +4,139 @@
 
 ---
 
-## Current Milestone: `v1.0 – Production Inference Runtime & Operator Fusion`
+## Current Milestone: `v1.1 – Inference Compiler & Execution Planning`
 
-> **Development Status:** `v1.0 (Production Release)`
-> TensorForge v1.0 establishes a complete, production-grade **Inference Engine** with graph-level **Operator Fusion** (`InferenceRuntime.optimize()`). By collapsing multi-operation subgraphs into specialized single-pass native C++ compute kernels, v1.0 eliminates intermediate buffer allocations, maximizes CPU cache locality, and delivers significant latency and throughput improvements across both FP32 and INT8 low-precision workloads.
-
----
-
-## Project Overview
-
-TensorForge provides end-to-end, first-principles implementations of tensor memory representation, automatic differentiation, neural network composition, model training, post-training quantization, serialization, and high-performance inference.
-
-In **v1.0**, TensorForge includes:
-- **Core Tensor Abstraction (`tensorforge/tensor/`):** Contiguous physical memory buffers (`Storage`, `NumPyStorage`, `NativeStorage`), dynamic shape/stride utilities, broadcasting, and strong DType semantics.
-- **Autograd Engine (`tensorforge/autograd/`):** Custom reverse-mode automatic differentiation DAG engine with topological backpropagation, gradient accumulation, and context control (`no_grad()`, `detach()`, `zero_grad()`).
-- **Neural Network Library (`tensorforge/nn/`):** `Parameter`, `Module`, `Linear`, activation functions (`ReLU`, `Sigmoid`, `Tanh`, `Softmax`), loss criteria (`MSELoss`, `CrossEntropyLoss`), and containers (`Sequential`).
-- **Training Subsystem (`tensorforge/optim/`, `tensorforge/training/`, `tensorforge/data/`):** First-order optimizers (`SGD`, `Adam`), `TensorDataset`, `DataLoader`, and high-level `Trainer`.
-- **C++17 Native Acceleration Subsystem (`native/`):**
-  - 64-byte aligned `DefaultCPUAllocator` with active memory tracking.
-  - Native C++ `Storage` with RAII memory lifetime ownership.
-  - Native C++ `Tensor` and `Shape` representations preserving row-major contiguous layout.
-  - Handcrafted CPU compute kernels: FP32 element-wise arithmetic, cache-aware FP32 matmul, and INT8 quantized matmul.
-  - **NEW in v1.0: Fused Forward Kernels:** `fused_linear`, `fused_linear_relu`, `fused_linear_sigmoid`, `fused_linear_tanh`, `fused_linear_softmax`, and INT8 `fused_qlinear_relu_int8`.
-- **Quantization & INT8 Inference Subsystem (`tensorforge/quantization/`):**
-  - **`QuantizedTensor`:** Low-precision data structure storing contiguous INT8 physical memory alongside linear scale and zero-point parameters.
-  - **Quantization Math:** Symmetric ($z=0$) and Asymmetric Affine quantization algorithms with numerical safety.
-  - **Calibration Algorithms:** `MinMaxCalibrator`, `MovingAverageCalibrator`, and outlier-resistant `PercentileCalibrator`.
-  - **INT8 Compute Kernels:** `qmatmul` and `fused_qlinear_relu_int8` with 32-bit integer accumulation to prevent overflow.
-- **Model Serialization & Checkpointing Subsystem (`tensorforge/serialization/`):**
-  - Safe `.tfmodel` and `.tfckpt` structured ZIP archives (**strictly avoiding `pickle`** for tensor storage).
-  - In-place physical parameter loading preserving `Parameter` object identity and `requires_grad`.
-  - Optimizer state persistence and training resumption.
-- **Production Inference & Operator Fusion Subsystem (`tensorforge/inference/`):**
-  - **`InferenceRuntime`:** Standalone prediction engine operating in `eval` mode with strict `no_grad` guarantees (zero backward graph allocation).
-  - **`InferenceGraph` & `OperatorFusionPass`:** Intermediate graph representation with pattern-matching operator fusion.
-  - **`GraphOptimizer`:** Execution pipeline with multi-backend dispatch and robust fallback guarantees.
+> **Development Status:** `v1.1 (Production Release)`
+> TensorForge v1.1 introduces an ahead-of-time **Inference Compiler & Memory Planner** (`InferenceCompiler`, `ExecutionPlan`, `WorkspaceArena`). Building upon v1.0 operator fusion, v1.1 statically analyzes tensor shape flows, conducts buffer liveness analysis to eliminate steady-state memory allocations, pre-binds optimal native C++ kernel dispatches, and caches execution plans for zero-overhead repeated predictions across FP32 and INT8 workloads.
 
 ---
 
-## Operator Fusion Architecture
+## End-to-End System Architecture
 
 ```
-                 Original Serialized Model (.tfmodel)
-                                  │
-                                  ▼
-                             ModelLoader
-                   (Reconstructs Layer Hierarchy)
-                                  │
-                                  ▼
-                           InferenceGraph
-                    ┌─────────────────────────┐
-                    │ [0] Linear (16 -> 32)   │
-                    │ [1] ReLU                │
-                    │ [2] Linear (32 -> 4)    │
-                    │ [3] Softmax (dim=-1)    │
-                    └─────────────────────────┘
-                                  │
-                                  ▼
-                         OperatorFusionPass
-                    (Collapses Adjacent Patterns)
-                                  │
-                                  ▼
-                      Optimized InferenceGraph
-                    ┌─────────────────────────┐
-                    │ [0] FusedLinear(ReLU)   │
-                    │ [1] FusedLinear(Softmax)│
-                    └─────────────────────────┘
-                                  │
-                                  ▼
-                          InferenceRuntime
-                                  │
-          ┌───────────────────────┴───────────────────────┐
-          ▼                                               ▼
-   Native C++ Backend                               NumPy Backend
-(fused_linear_relu, etc.)                     (Single-Pass Fused Reference)
-          │                                               │
-          └───────────────────────┬───────────────────────┘
-                                  │
-                                  ▼
-                     Prediction Output Tensor
-                (requires_grad=False, grad_fn=None)
+Tensor Core (NumPyStorage, NativeStorage, Strides, Broadcasting)
+  │
+  ▼
+Automatic Differentiation Engine (Reverse-Mode DAG, Topological Backprop)
+  │
+  ▼
+Neural Network Subsystem (Parameter, Module, Linear, Activations, Losses)
+  │
+  ▼
+Training & Optimization Pipeline (SGD, Adam, Dataset, DataLoader, Trainer)
+  │
+  ▼
+Model Serialization & Checkpointing (Safe .tfmodel / .tfckpt Containers)
+  │
+  ▼
+Inference Graph Representation (InferenceGraph, InferenceNode)
+  │
+  ▼
+Operator Fusion Pass (FusedLinear: ReLU, Sigmoid, Tanh, Softmax)
+  │
+  ▼
+Inference Compiler (InferenceCompiler, CompiledPlanCache)
+  ├── Static Shape Propagation (ShapePropagator)
+  ├── Buffer Lifetime & Reuse Planning (MemoryPlanner)
+  └── Ahead-of-Time Kernel Resolution (ExecutionStep)
+  │
+  ▼
+Execution Plan IR (ExecutionPlan, 64-Byte Aligned Ping-Pong Slots)
+  │
+  ▼
+Native C++ Memory Arena & Kernel Execution (WorkspaceArena, CPU Kernels)
 ```
 
 ---
 
-## Supported Fusion Patterns
+## Key Features & Compiler Subsystems
 
-| Pattern | Source Layers | Fused Operator | Native Kernel |
-|---|---|---|---|
-| **Linear + ReLU** | `Linear(M, K)` $\to$ `ReLU()` | `FusedLinear(activation='relu')` | `native_fused_linear_relu` |
-| **Linear + Sigmoid** | `Linear(M, K)` $\to$ `Sigmoid()` | `FusedLinear(activation='sigmoid')` | `native_fused_linear_sigmoid` |
-| **Linear + Tanh** | `Linear(M, K)` $\to$ `Tanh()` | `FusedLinear(activation='tanh')` | `native_fused_linear_tanh` |
-| **Linear + Softmax** | `Linear(M, K)` $\to$ `Softmax()` | `FusedLinear(activation='softmax')` | `native_fused_linear_softmax` |
-| **Quantized Linear + ReLU** | `QuantizedLinear` $\to$ `ReLU()` | `FusedQuantizedLinear(ReLU)` | `native_fused_qlinear_relu` |
+### 1. Execution Plan IR (`tensorforge/inference/plan.py`)
+- **`ExecutionStep`:** Pre-resolved instruction storing operator type, input slot ID, output slot ID, input/output tensor shapes, parameter references, and pre-bound backend dispatch (`native_fused`, `native`, `numpy_fused`, `numpy`).
+- **`ExecutionPlan`:** Immutable, deterministic execution schedule containing ordered execution steps, workspace memory layouts, and shape metadata.
+
+### 2. Static Shape Propagation (`tensorforge/inference/shapes.py`)
+- **`ShapePropagator`:** Infers input and output shapes through `Linear`, `ReLU`, `Sigmoid`, `Tanh`, `Softmax`, and `FusedLinear` without evaluating tensors or allocating runtime memory.
+- Incompatible feature dimensions or invalid inputs trigger descriptive `ShapeError` exceptions ahead of execution.
+
+### 3. Inference Memory Planner (`tensorforge/inference/memory.py`)
+- **`MemoryPlanner`:** Conducts liveness interval analysis across the execution graph.
+- Implements ping-pong workspace slot allocation (`slot 0` $\leftrightarrow$ `slot 1`), bounding intermediate memory overhead to at most two reusable memory buffers regardless of network depth.
+- Computes 64-byte aligned memory offsets and exact peak workspace capacity requirements.
+
+### 4. Native Workspace Arena (`native/include/tensorforge/arena.hpp`, `native/src/arena.cpp`)
+- **`WorkspaceArena`:** RAII-managed contiguous CPU memory block allocated using 64-byte aligned allocators.
+- Eliminates dynamic heap allocation and system call overhead during prediction loops.
+
+### 5. Compiled Plan Cache (`tensorforge/inference/compiler.py`)
+- **`CompiledPlanCache`:** In-memory plan cache indexed by `(graph_id, input_shape, dtype, backend, is_quantized)`.
+- Eliminates redundant graph parsing, shape propagation, and memory planning for repeated predictions.
 
 ---
 
-## Execution Fallback Hierarchy
+## Fallback & Execution Hierarchy
 
-TensorForge guarantees deterministic execution with zero unhandled operation errors through an explicit 4-tier fallback hierarchy:
+TensorForge provides guaranteed deterministic execution through an automated 4-tier fallback hierarchy:
 
 ```
-1. Fused Native C++     ──(if native extension loaded & operands eligible)──►
-2. Fused NumPy Reference──(if native unavailable / input requires fallback)──►
-3. Unfused Native C++   ──(if unoptimized & native backend selected)────────►
-4. Unfused NumPy        ──(universal base reference)────────────────────────►
+1. Compiled Fused Native C++   ──(if native extension loaded & operands eligible)──►
+2. Compiled Fused NumPy Ref    ──(if native unavailable / input requires fallback)──►
+3. Eager Fused Native C++      ──(if uncompiled & native backend selected)────────►
+4. Eager NumPy Reference       ──(universal base reference)────────────────────────►
 ```
 
 ---
 
 ## Inference Runtime Usage Examples
 
-### 1. Basic Model Loading & Graph Optimization
+### 1. Compiling and Executing a Model
 
 ```python
 import tensorforge as tf
 from tensorforge.inference import InferenceRuntime
 
-# 1. Load exported model artifact
+# 1. Load exported model artifact (.tfmodel)
 runtime = InferenceRuntime.load("classifier.tfmodel")
 
-# 2. Apply graph-level operator fusion
-runtime.optimize()
+# 2. Compile model for expected input shape
+runtime.compile(input_shape=(8, 16))
 
-# 3. Inspect optimization diagnostic summary
+# 3. Inspect compiled summary
 summary = runtime.summary()
-print(f"Optimized: {summary['is_optimized']}")
-print(f"Collapsed: {summary['original_nodes']} -> {summary['optimized_nodes']} nodes")
-print(f"Fused Patterns: {summary['fused_patterns']}")
+print(f"Is Compiled:       {summary['is_compiled']}")
+print(f"Compiled Steps:    {summary['compiled_steps']}")
+print(f"Workspace Memory:  {summary['workspace_bytes']} bytes")
+print(f"Active Backend:    {summary['backend']}")
 
-# 4. Execute prediction on sample or batch
-x = tf.randn((8, runtime.input_shape[0]))
+# 4. Inspect ExecutionPlan IR
+print(runtime.execution_plan.summary())
+
+# 5. Predict with zero allocation overhead
+x = tf.randn((8, 16))
 predictions = runtime.predict(x)
 
 assert predictions.requires_grad is False
 assert predictions.grad_fn is None
 ```
 
-### 2. Multi-Backend Fused Inference
+### 2. Dynamic Batch Compilation & Cached Execution
 
 ```python
-import tensorforge as tf
-from tensorforge.backend import backend_context
-from tensorforge.inference import InferenceRuntime
-
-runtime = InferenceRuntime.load("classifier.tfmodel").optimize()
-x = tf.randn((16, runtime.input_shape[0]))
-
-# Run with NumPy Fused Backend
-with backend_context("numpy"):
-    out_np = runtime.predict(x)
-
-# Run with Native C++ Fused Fast Path
-with backend_context("native"):
-    out_native = runtime.predict(x)
+# The runtime automatically retrieves or compiles plans for different batch sizes
+out_single = runtime.predict(tf.randn((1, 16)))    # Batch size 1
+out_batch  = runtime.predict(tf.randn((32, 16)))   # Batch size 32
 ```
 
-### 3. INT8 Low-Precision Fused Inference
+### 3. INT8 Low-Precision Compiled Inference
 
 ```python
 from tensorforge.inference import InferenceRuntime
 
-# Load quantized model and optimize
-runtime_int8 = InferenceRuntime.load("quantized_classifier.tfmodel").optimize()
+# Load quantized model and compile
+runtime_int8 = InferenceRuntime.load("quantized_classifier.tfmodel").compile(input_shape=(8, 16))
 
-print(f"Is Quantized: {runtime_int8.is_quantized}")
-print(f"Is Optimized: {runtime_int8.is_optimized}")
+print(f"Quantized: {runtime_int8.is_quantized}")
+print(f"Compiled:  {runtime_int8.is_compiled}")
 
 output = runtime_int8.predict(x)
 ```
@@ -179,11 +146,14 @@ output = runtime_int8.predict(x)
 ## Running Benchmarks & Demonstrations
 
 ```bash
-# Production inference & operator fusion demonstration
-python examples/inference_demo.py
+# Compiled inference demonstration
+python examples/compiled_inference_demo.py
 
-# Inference performance benchmark (NumPy Unfused vs Native Unfused vs Native Fused)
+# Production inference performance benchmark (Eager vs Fused vs Compiled)
 python benchmarks/benchmark_inference.py
+
+# Operator fusion demonstration
+python examples/inference_demo.py
 
 # Model serialization demonstration
 python examples/serialization_demo.py
@@ -202,6 +172,7 @@ TensorForge/
 │   ├── CMakeLists.txt               # CMake build configuration
 │   ├── include/tensorforge/         # Public C++ headers
 │   │   ├── allocator.hpp            # 64-byte aligned CPU allocator
+│   │   ├── arena.hpp                # NEW: 64-byte aligned workspace arena
 │   │   ├── dtype.hpp                # DType enum & traits
 │   │   ├── kernels.hpp              # Unfused & Fused inference kernels
 │   │   ├── shape.hpp                # Shape & contiguous stride math
@@ -209,6 +180,7 @@ TensorForge/
 │   │   └── tensor.hpp               # Native Tensor abstraction
 │   ├── src/                         # Native implementations & pybind11 bindings
 │   │   ├── allocator.cpp
+│   │   ├── arena.cpp                # NEW: WorkspaceArena implementation
 │   │   ├── bindings.cpp             # pybind11 module bindings
 │   │   ├── dtype.cpp
 │   │   ├── kernels.cpp              # Handcrafted SIMD-friendly compute kernels
@@ -219,13 +191,17 @@ TensorForge/
 │       └── test_native.cpp          # Standalone C++ test suite
 │
 ├── tensorforge/
-│   ├── __init__.py                  # Top-level exports & version (1.0.0)
-│   ├── inference/                   # Production Inference & Operator Fusion Subsystem
+│   ├── __init__.py                  # Top-level exports & version (1.1.0)
+│   ├── inference/                   # Production Inference & Compiler Subsystem
 │   │   ├── __init__.py              # Public inference exports
+│   │   ├── compiler.py              # NEW: InferenceCompiler & CompiledPlanCache
+│   │   ├── plan.py                  # NEW: ExecutionPlan and ExecutionStep IR
+│   │   ├── shapes.py                # NEW: Static ShapePropagator engine
+│   │   ├── memory.py                # NEW: MemoryPlanner & buffer lifetime reuse
 │   │   ├── graph.py                 # InferenceGraph and InferenceNode representations
 │   │   ├── fusion.py                # OperatorFusionPass pattern matching engine
 │   │   ├── optimizer.py             # GraphOptimizer execution dispatcher
-│   │   ├── runtime.py               # InferenceRuntime engine
+│   │   ├── runtime.py               # InferenceRuntime engine with compile() API
 │   │   └── loader.py                # ModelLoader & architecture reconstitution
 │   ├── serialization/               # Model Serialization Subsystem (.tfmodel, .tfckpt)
 │   ├── quantization/                # Quantization Subsystem (INT8, Calibration, qmatmul)
@@ -237,9 +213,13 @@ TensorForge/
 │   └── utils/                       # Validation & Exception hierarchy
 │
 ├── tests/                           # Python Test Suite
-│   ├── inference/                   # Inference & Fusion test suite
-│   │   ├── test_fusion.py           # Pattern matching and node collapsing tests
-│   │   ├── test_fused_correctness.py# Fused vs unfused mathematical parity tests
+│   ├── inference/                   # Inference & Compiler test suite
+│   │   ├── test_compiler.py         # NEW: Graph to ExecutionPlan conversion tests
+│   │   ├── test_shapes.py           # NEW: Static shape propagation tests
+│   │   ├── test_memory_planner.py   # NEW: Buffer lifetime & reuse tests
+│   │   ├── test_compiled_runtime.py # NEW: compile(), caching, and execution tests
+│   │   ├── test_fusion.py           # Operator fusion pattern tests
+│   │   ├── test_fused_correctness.py# Fused mathematical parity tests
 │   │   ├── test_fused_backend_dispatch.py # Multi-backend execution tests
 │   │   ├── test_loader.py
 │   │   ├── test_runtime.py
@@ -255,13 +235,14 @@ TensorForge/
 │   └── optim/
 │
 ├── examples/                        # Demonstrations
-│   ├── inference_demo.py            # End-to-end production inference & fusion demo
+│   ├── compiled_inference_demo.py   # NEW: Compiled inference & execution plan demo
+│   ├── inference_demo.py            # Operator fusion demo
 │   ├── serialization_demo.py
 │   ├── quantization_demo.py
 │   └── training_demo.py
 │
 ├── benchmarks/                      # Performance Benchmarks
-│   ├── benchmark_inference.py       # Latency, throughput, and speedup benchmark
+│   ├── benchmark_inference.py       # Eager vs Fused vs Compiled benchmark
 │   ├── benchmark_quantization.py
 │   └── benchmark_matmul.py
 │
@@ -286,3 +267,4 @@ TensorForge/
 | **v0.8 – Model Serialization & Checkpointing** | **Complete** | Safe .tfmodel & .tfckpt formats, state_dict, optimizer state persistence, training resumption |
 | **v0.9 – Portable Inference Runtime & Model Export** | **Complete** | Dedicated InferenceRuntime, ModelLoader, zero-code architecture reconstitution, multi-backend dispatch |
 | **v1.0 – Production Inference Engine & Operator Fusion** | **Complete** | InferenceGraph, OperatorFusionPass, native fused C++ kernels, multi-backend fallback, production release |
+| **v1.1 – Inference Compiler & Execution Planning** | **Complete** | InferenceCompiler, ExecutionPlan IR, static shape propagation, memory planner, native arena, plan caching |

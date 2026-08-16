@@ -1,4 +1,4 @@
-"""Dedicated Production Inference Runtime for executing TensorForge models with Operator Fusion."""
+"""Dedicated Production Inference Runtime with Ahead-of-Time Compilation and Execution Planning."""
 
 from __future__ import annotations
 
@@ -7,9 +7,11 @@ import numpy as np
 
 from tensorforge.autograd.engine import no_grad
 from tensorforge.backend.dispatcher import backend_context, get_backend, get_last_backend, set_backend
+from tensorforge.inference.compiler import InferenceCompiler
 from tensorforge.inference.graph import InferenceGraph
 from tensorforge.inference.loader import ModelLoader
 from tensorforge.inference.optimizer import GraphOptimizer
+from tensorforge.inference.plan import ExecutionPlan
 from tensorforge.nn.linear import Linear
 from tensorforge.nn.module import Module
 from tensorforge.nn.sequential import Sequential
@@ -19,19 +21,27 @@ from tensorforge.tensor.dtype import float32
 from tensorforge.tensor.tensor import Tensor
 from tensorforge.utils.validation import TensorForgeError
 
+try:
+    import _tensorforge_native as _native
+except ImportError:
+    try:
+        from tensorforge import _tensorforge_native as _native
+    except ImportError:
+        _native = None
+
 
 class InferenceRuntime:
-    """A production-grade, standalone inference engine for TensorForge models.
+    """A production-grade inference runtime supporting Operator Fusion and Execution Planning.
 
-    Loads serialized .tfmodel artifacts, reconstructs the network graph, restores weights,
-    supports graph-level operator fusion (e.g. Linear+ReLU, Linear+Sigmoid, Linear+Tanh, Linear+Softmax),
-    and executes forward predictions in eval mode with strict no_grad guarantees across CPU NumPy
-    and Native C++ acceleration backends.
+    Loads serialized .tfmodel artifacts, reconstructs network graphs, supports graph-level
+    operator fusion (Linear+ReLU, Linear+Sigmoid, Linear+Tanh, Linear+Softmax), compiles models
+    into deterministic ExecutionPlans with workspace memory reuse, and executes forward predictions
+    with strict no_grad guarantees.
 
     Args:
         model: Reconstructed Module instance in evaluation mode.
         metadata: Model archive metadata.
-        is_quantized: Whether the model parameters are stored in INT8 low precision.
+        is_quantized: Whether model parameters are stored in INT8 low precision.
         state_dict: State dictionary containing raw or quantized parameters.
         backend: Optional backend override ('numpy' or 'native').
     """
@@ -63,6 +73,11 @@ class InferenceRuntime:
             "fused_patterns": [],
         }
 
+        # Compilation & Execution Plan state
+        self._compiled_plan: Optional[ExecutionPlan] = None
+        self._is_compiled: bool = False
+        self._arena: Optional[Any] = None
+
         # Infer input and output dimensions
         self._input_shape: Optional[Tuple[int, ...]] = None
         self._output_shape: Optional[Tuple[int, ...]] = None
@@ -88,7 +103,7 @@ class InferenceRuntime:
         backend: Optional[str] = None,
         strict: bool = True,
     ) -> InferenceRuntime:
-        """Load a .tfmodel artifact and construct a ready-to-use InferenceRuntime.
+        """Load a .tfmodel artifact and construct an InferenceRuntime.
 
         Args:
             filepath: Path to the .tfmodel archive.
@@ -110,8 +125,8 @@ class InferenceRuntime:
     def optimize(self) -> InferenceRuntime:
         """Perform graph-level operator fusion and kernel optimizations.
 
-        Identifies and collapses fusible layers (Linear+ReLU, Linear+Sigmoid,
-        Linear+Tanh, Linear+Softmax) into high-performance fused execution nodes.
+        Collapses adjacent fusible layers (Linear+ReLU, Linear+Sigmoid,
+        Linear+Tanh, Linear+Softmax) into single FusedLinear execution nodes.
 
         Returns:
             Self (enables method chaining).
@@ -120,10 +135,71 @@ class InferenceRuntime:
         self._is_optimized = True
         return self
 
+    def compile(
+        self,
+        input_shape: Tuple[int, ...],
+        backend: Optional[str] = None,
+        use_cache: bool = True,
+    ) -> InferenceRuntime:
+        """Compile the inference graph into a reusable, memory-planned ExecutionPlan.
+
+        Args:
+            input_shape: Input tensor shape (e.g. (batch_size, in_features) or (in_features,)).
+            backend: Optional backend override.
+            use_cache: Whether to use plan caching.
+
+        Returns:
+            Self (enables method chaining).
+        """
+        if not self._is_optimized:
+            self.optimize()
+
+        target_graph = self.graph
+        target_backend = backend if backend is not None else self.backend
+
+        # Normalize 1D input shape to 2D (1, in_features) if necessary
+        normalized_shape = (1, input_shape[0]) if len(input_shape) == 1 else input_shape
+
+        self._compiled_plan = InferenceCompiler.compile(
+            graph=target_graph,
+            input_shape=normalized_shape,
+            backend=target_backend,
+            dtype=float32,
+            is_quantized=self._is_quantized,
+            use_cache=use_cache,
+        )
+
+        self._is_compiled = True
+
+        # Initialize native workspace arena if native runtime is available
+        if target_backend == "native" and _native is not None and hasattr(_native, "WorkspaceArena"):
+            ws_bytes = self._compiled_plan.total_workspace_bytes
+            if ws_bytes > 0:
+                self._arena = _native.WorkspaceArena(ws_bytes)
+
+        return self
+
     @property
     def is_optimized(self) -> bool:
         """Whether operator fusion optimizations are active."""
         return self._is_optimized
+
+    @property
+    def is_compiled(self) -> bool:
+        """Whether the model has been compiled into an ExecutionPlan."""
+        return self._is_compiled
+
+    @property
+    def execution_plan(self) -> Optional[ExecutionPlan]:
+        """Access the active compiled ExecutionPlan."""
+        return self._compiled_plan
+
+    @property
+    def workspace_size(self) -> int:
+        """Planned workspace memory size in bytes."""
+        if self._compiled_plan is not None:
+            return self._compiled_plan.total_workspace_bytes
+        return 0
 
     @property
     def graph(self) -> InferenceGraph:
@@ -203,17 +279,48 @@ class InferenceRuntime:
             x = Tensor(np.asarray(input_data, dtype=np.float32), dtype=float32)
 
         target_backend = self.backend
+
         with backend_context(target_backend):
             with no_grad():
-                if self._is_optimized and self._optimized_graph is not None:
+                # 1. Compiled Execution Path
+                if self._is_compiled and self._compiled_plan is not None:
+                    # Check shape compatibility
+                    if x.shape == self._compiled_plan.input_shape:
+                        output = InferenceCompiler.execute_plan(self._compiled_plan, x)
+                    elif len(x.shape) == len(self._compiled_plan.input_shape) and x.shape[1:] == self._compiled_plan.input_shape[1:]:
+                        # Dynamic batch size recompilation (cached automatically)
+                        plan = InferenceCompiler.compile(
+                            graph=self.graph,
+                            input_shape=x.shape,
+                            backend=target_backend,
+                            dtype=float32,
+                            is_quantized=self._is_quantized,
+                            use_cache=True,
+                        )
+                        output = InferenceCompiler.execute_plan(plan, x)
+                    else:
+                        # Fallback to eager optimized execution
+                        output = GraphOptimizer.execute(
+                            self.graph,
+                            x,
+                            backend=target_backend,
+                            is_quantized=self._is_quantized,
+                        )
+
+                # 2. Optimized Graph Path
+                elif self._is_optimized and self._optimized_graph is not None:
                     output = GraphOptimizer.execute(
                         self._optimized_graph,
                         x,
                         backend=target_backend,
                         is_quantized=self._is_quantized,
                     )
+
+                # 3. Quantized Eager Fallback Path
                 elif self._is_quantized:
                     output = self._predict_quantized(x)
+
+                # 4. Standard Eager Path
                 else:
                     output = self._model(x)
 
@@ -273,38 +380,50 @@ class InferenceRuntime:
 
         Returns:
             Dictionary with architecture details, graph optimization status,
-            parameter counts, memory consumption, and backend configuration.
+            execution plan details, workspace memory sizes, and parameter counts.
         """
         from tensorforge.serialization.checkpoint import compute_model_size
 
         size_stats = compute_model_size(self._state_dict if self._is_quantized else self._model)
+        ws_bytes = self.workspace_size
 
         return {
             "model_type": type(self._model).__name__,
             "architecture": repr(self._model),
             "is_quantized": self._is_quantized,
             "is_optimized": self._is_optimized,
+            "is_compiled": self._is_compiled,
             "backend": self.backend,
             "last_dispatch": get_last_backend(),
             "input_shape": self._input_shape,
             "output_shape": self._output_shape,
             "original_nodes": self.original_node_count,
             "optimized_nodes": self.optimized_node_count,
+            "compiled_steps": len(self._compiled_plan) if self._compiled_plan is not None else 0,
             "fused_count": self.fused_count,
             "fused_patterns": self.fused_patterns,
+            "workspace_bytes": ws_bytes,
+            "workspace_kb": ws_bytes / 1024.0,
             "num_parameters": size_stats["num_parameters"],
             "total_bytes": size_stats["total_bytes"],
             "size_kb": size_stats["size_kb"],
             "format_version": self._metadata.get("format_version", "1.0"),
-            "tensorforge_version": "1.0.0",
+            "tensorforge_version": "1.1.0",
         }
 
     def __repr__(self) -> str:
-        opt_str = f", optimized={self._is_optimized} ({self.fused_count} fused)" if self._is_optimized else ""
+        status_items = []
+        if self._is_optimized:
+            status_items.append(f"optimized ({self.fused_count} fused)")
+        if self._is_compiled:
+            status_items.append(f"compiled ({len(self._compiled_plan or [])} steps, ws={self.workspace_size}B)")
+
+        status_str = f", {', '.join(status_items)}" if status_items else ""
+
         return (
             f"InferenceRuntime(\n"
             f"  backend='{self.backend}',\n"
-            f"  is_quantized={self._is_quantized}{opt_str},\n"
+            f"  is_quantized={self._is_quantized}{status_str},\n"
             f"  input_shape={self._input_shape},\n"
             f"  output_shape={self._output_shape},\n"
             f"  model={repr(self._model)}\n"
