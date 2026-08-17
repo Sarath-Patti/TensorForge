@@ -41,8 +41,32 @@ class SerializationError(TensorForgeError, ValueError):
     """Raised when model or checkpoint serialization, deserialization, or validation fails."""
 
 
-class RuntimeClosedError(TensorForgeError, RuntimeError):
+class RuntimeStateError(TensorForgeError, RuntimeError):
+    """Raised when an operation is invalid for the current runtime lifecycle state."""
+
+
+class RuntimeClosedError(RuntimeStateError):
     """Raised when an operation is attempted on a closed InferenceRuntime."""
+
+
+class TensorForgeInputError(TensorForgeError, ValueError):
+    """Raised when input data fails runtime validation (shape mismatch, incompatible dtype, non-finite values)."""
+
+
+class RuntimeLimitError(TensorForgeError, ValueError):
+    """Raised when an inference request exceeds configured runtime limits (batch size, input elements, workspace)."""
+
+
+class RuntimeBusyError(RuntimeLimitError, RuntimeError):
+    """Raised when the maximum concurrent request capacity has been reached."""
+
+
+class RuntimeResourceError(TensorForgeError, RuntimeError):
+    """Raised when a required system or memory resource allocation fails."""
+
+
+class RuntimeTimeoutError(TensorForgeError, TimeoutError):
+    """Raised when prediction execution exceeds the configured timeout duration."""
 
 
 class ExecutionContextError(TensorForgeError, RuntimeError):

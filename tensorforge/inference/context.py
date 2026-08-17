@@ -31,10 +31,14 @@ class ExecutionContext:
         self.last_used_at: float = self.created_at
         self.prediction_count: int = 0
         self.arena: Optional[Any] = None
+        self.request_id: Optional[str] = None
+        self.metadata: Dict[str, Any] = {}
 
     def reset(self) -> None:
-        """Reset the execution context state, clearing all intermediate buffers."""
+        """Reset the execution context state, clearing all intermediate buffers and request metadata."""
         self.slots.clear()
+        self.request_id = None
+        self.metadata.clear()
         if self.arena is not None and hasattr(self.arena, "reset"):
             self.arena.reset()
         self.is_in_use = False

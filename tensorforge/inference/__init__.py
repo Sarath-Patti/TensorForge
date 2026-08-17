@@ -4,6 +4,7 @@ from tensorforge.inference.compiler import CompiledPlanCache, InferenceCompiler
 from tensorforge.inference.context import ExecutionContext, ExecutionContextPool
 from tensorforge.inference.fusion import OperatorFusionPass
 from tensorforge.inference.graph import InferenceGraph, InferenceNode
+from tensorforge.inference.limits import RuntimeLimits, RuntimeState
 from tensorforge.inference.loader import ModelLoader
 from tensorforge.inference.memory import BufferLifetime, MemoryPlan, MemoryPlanner, MemoryRegion, PlannedBuffer
 from tensorforge.inference.optimizer import GraphOptimizer
@@ -35,4 +36,6 @@ __all__ = [
     "ProfileSession",
     "ProfileEvent",
     "PerformanceReport",
+    "RuntimeLimits",
+    "RuntimeState",
 ]

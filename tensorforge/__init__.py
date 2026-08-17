@@ -32,7 +32,9 @@ from tensorforge.inference import (
     PlannedBuffer,
     ProfileEvent,
     ProfileSession,
+    RuntimeLimits,
     RuntimeProfiler,
+    RuntimeState,
     ShapePropagator,
 )
 from tensorforge.quantization import (
@@ -108,14 +110,20 @@ from tensorforge.utils.validation import (
     ExecutionContextError,
     IndexError_,
     QuantizationError,
+    RuntimeBusyError,
     RuntimeClosedError,
+    RuntimeLimitError,
+    RuntimeResourceError,
+    RuntimeStateError,
+    RuntimeTimeoutError,
     SerializationError,
     ShapeError,
     StorageError,
     TensorForgeError,
+    TensorForgeInputError,
 )
 
-__version__ = "1.4.0"
+__version__ = "1.5.0"
 
 __all__ = [
     "__version__",
@@ -161,6 +169,8 @@ __all__ = [
     "ProfileSession",
     "ProfileEvent",
     "PerformanceReport",
+    "RuntimeLimits",
+    "RuntimeState",
     # Serialization
     "save_model",
     "load_model",
@@ -235,7 +245,13 @@ __all__ = [
     "StorageError",
     "QuantizationError",
     "SerializationError",
+    "RuntimeStateError",
     "RuntimeClosedError",
+    "TensorForgeInputError",
+    "RuntimeLimitError",
+    "RuntimeBusyError",
+    "RuntimeResourceError",
+    "RuntimeTimeoutError",
     "ExecutionContextError",
     "ConcurrencyError",
 ]
