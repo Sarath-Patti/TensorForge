@@ -4,121 +4,112 @@
 
 ---
 
-## Current Milestone: `v1.5 – Production Reliability, Resource Management & Runtime Safety`
+## Current Milestone: `v1.6 – Production Inference Scheduling & Dynamic Batching`
 
-> **Development Status:** `v1.5 (Production Release)`
-> TensorForge v1.5 hardens the inference runtime for mission-critical, long-running production environments. It introduces formal lifecycle management (`CREATED`, `READY`, `CLOSED`), configurable admission control and resource constraints (`RuntimeLimits`), strict input validation (rank, feature dimension, finite value checks), workspace memory protection, concurrent request limiting (`RuntimeBusyError`), soft timeout enforcement (`RuntimeTimeoutError`), request-level isolation with unique request IDs, clean failure recovery, and extended production diagnostics in `health()` and `stats()`.
+> **Development Status:** `v1.6 (Production Release)`
+> TensorForge v1.6 introduces an in-process request scheduling and dynamic batching subsystem (`InferenceScheduler`). The scheduler sits above `InferenceRuntime`, queueing concurrent client requests with bounded backpressure (`SchedulerQueueFullError`), automatically aggregating compatible sub-batches into larger execution batches up to `max_batch_size` or upon `batch_timeout_ms`, executing them through the underlying compiled/native runtime, and demultiplexing the resulting output tensors back to the originating requests.
 
 ---
 
 ## End-to-End System Architecture
 
 ```
-Tensor Core (NumPyStorage, NativeStorage, Strides, Broadcasting)
-  │
-  ▼
-Automatic Differentiation Engine (Reverse-Mode DAG, Topological Backprop)
-  │
-  ▼
-Neural Network Subsystem (Parameter, Module, Linear, Activations, Losses)
-  │
-  ▼
-Training & Optimization Pipeline (SGD, Adam, Dataset, DataLoader, Trainer)
-  │
-  ▼
-Model Serialization & Checkpointing (Safe .tfmodel / .tfckpt Containers)
-  │
-  ▼
-Inference Graph Representation (InferenceGraph, InferenceNode)
-  │
-  ▼
-Operator Fusion Pass (FusedLinear: ReLU, Sigmoid, Tanh, Softmax)
-  │
-  ▼
-Inference Compiler (InferenceCompiler, CompiledPlanCache)
-  ├── Static Shape Propagation (ShapePropagator)
-  ├── Interval Memory Planner & Region Reuse (MemoryPlanner, MemoryPlan)
-  ├── Parallel Workload Evaluator & Thread Allocation (ExecutionStep)
-  └── Thread-Safe Plan Cache
-  │
-  ▼
-Execution Plan IR (Immutable ExecutionPlan, MemoryRegions, Parallel Flags)
-  │
-  ▼
-Hardened Production Inference Runtime (InferenceRuntime, Limits, ContextPool, ThreadPool)
-  ├── Admission Control & Resource Limits (RuntimeLimits: batch, elements, workspace, timeout, concurrency)
-  ├── Request Isolation & Unique Request IDs (ExecutionContext.request_id)
-  ├── Input Validation & Finite Value Protection (TensorForgeInputError)
-  ├── Graceful Lifecycle & Idempotent Shutdown (RuntimeState: CREATED, READY, CLOSED)
-  ├── Operational Health & Diagnostics (health, stats)
-  └── High-Resolution Telemetry & Profiler (RuntimeProfiler, ProfileEvent, PerformanceReport)
+                  Inference Request (predict / submit)
+                                 │
+                                 ▼
+                         Runtime Admission
+                                 │
+                                 ▼
+                          Request Scheduler (InferenceScheduler)
+                                 │
+                          ┌──────┴──────┐
+                          │             │
+                      Queue          Batching (FIFO / LARGEST_BATCH_FIRST)
+                          │             │
+                          └──────┬──────┘
+                                 ▼
+                          Dynamic Batch
+                                 │
+                                 ▼
+                          InferenceRuntime (FP32 / INT8, Compiled / Fused / Native)
+                                 │
+                          Batch Output
+                                 │
+                                 ▼
+                        Result Demultiplexer
+                                 │
+                          ┌──────┼──────┐
+                          ▼      ▼      ▼
+                        Req A  Req B  Req C
 ```
 
 ---
 
 ## Key Features & Subsystems
 
-### 1. Admission Control & Resource Limits (`tensorforge/inference/limits.py`)
-- **`RuntimeLimits`:** Configurable resource limits protecting the runtime against out-of-memory errors and overloaded compute:
-  - `max_batch_size`: Rejects batch sizes exceeding the threshold before allocation.
-  - `max_input_elements`: Limits total input tensor element count.
-  - `max_workspace_bytes`: Guards against excessive execution plan workspace memory demands.
-  - `max_prediction_time_ms`: Soft timeout monitoring for runaway predictions.
-  - `max_concurrent_requests`: Rejects incoming requests with `RuntimeBusyError` when capacity is full.
+### 1. In-Process Inference Scheduler (`tensorforge/inference/scheduler.py`)
+- **`InferenceScheduler`**: Wraps any `InferenceRuntime` to manage request concurrency and dynamic batching.
+- **`SchedulerConfig`**:
+  - `max_batch_size`: Maximum dynamically aggregated batch dimension.
+  - `max_queue_size`: Bounded queue depth protecting against memory exhaustion.
+  - `batch_timeout_ms`: Maximum time to wait for a full batch before dispatching.
+  - `policy`: Scheduling policy (`FIFO` or `LARGEST_BATCH_FIRST`).
+  - `drain_on_close`: Whether to drain pending requests prior to shutdown.
 
-### 2. Runtime Lifecycle & Graceful Shutdown
-- **Lifecycle States:** Clear state progression (`CREATED` -> `READY` -> `CLOSED`).
-- **Idempotent `close()`:** Releasing pooled execution contexts and native workspace arenas cleanly without double-free errors.
-- **Fail-Safe Invariants:** Attempting predictions after shutdown raises `RuntimeClosedError`.
+### 2. Dynamic Batching & Result Demultiplexing
+- **Automatic Batch Assembly**: Combines compatible 1D and 2D tensor requests along the batch dimension into a single contiguous tensor.
+- **Batch Compatibility Rules**: Verifies rank, feature dimensions, and dtype compatibility before joining a batch. Incompatible requests remain queued for compatible batches.
+- **Precise Output Slicing**: Slices and demultiplexes output rows directly back to individual request futures without data leakage across requests.
 
-### 3. Input Validation & Fault Isolation
-- **Comprehensive Validation:** Verifies tensor rank (scalar/0D inputs rejected), feature dimension matching, and non-finite value checks (`NaN`/`Inf` rejected with `TensorForgeInputError`).
-- **Failure Recovery:** A failed or rejected request never corrupts model weights, compiled plans, profiler metrics, or subsequent prediction requests.
+### 3. Synchronous & Asynchronous APIs
+- **Synchronous API (`scheduler.predict(x)`)**: Blocks until the dynamically formed batch completes and returns the sliced output tensor.
+- **Asynchronous API (`scheduler.submit(x) -> InferenceFuture`)**: Returns a lightweight future supporting `.result()`, `.done()`, `.exception()`, and pre-execution `.cancel()`.
 
-### 4. Operational Health & Reliability Statistics
-- **`runtime.health()`:** Lightweight report containing lifecycle state, `accepting_requests`, `active_requests`, `rejected_requests`, `resource_limit_violations`, `last_error`, and active limits.
-- **`runtime.stats()`:** Extended diagnostic telemetry tracking accepted/completed/failed/rejected requests, peak concurrent requests, timeout occurrences, and input validation failures.
+### 4. Backpressure & Lifecycle Protection
+- **Bounded Queue**: Immediately rejects requests when queue capacity is reached (`SchedulerQueueFullError`).
+- **Graceful Draining & Shutdown**: `scheduler.close(drain=True)` finishes in-flight requests and cleanly joins the background worker thread.
+- **Post-Shutdown Protection**: Rejects submissions with `SchedulerClosedError`.
 
 ---
 
-## Production Runtime Usage Examples
+## Usage Examples
 
-### 1. Configuring Resource Limits & Handling Admission Control
+### 1. Initializing Dynamic Batching Scheduler
 
 ```python
 import tensorforge as tf
-from tensorforge.inference import InferenceRuntime, RuntimeLimits
-from tensorforge.utils.validation import RuntimeBusyError, RuntimeLimitError
-
-# 1. Define production limits
-limits = RuntimeLimits(
-    max_batch_size=32,
-    max_input_elements=2048,
-    max_workspace_bytes=1024 * 1024,  # 1 MB workspace limit
-    max_concurrent_requests=8,
-    max_prediction_time_ms=100.0,
+from tensorforge.inference import (
+    InferenceRuntime,
+    InferenceScheduler,
+    SchedulerConfig,
+    SchedulingPolicy,
 )
 
-# 2. Load model with limits
-runtime = InferenceRuntime.load("classifier.tfmodel", limits=limits)
+# 1. Load compiled runtime
+runtime = InferenceRuntime.load("model.tfmodel")
 
-# 3. Safe inference with exception handling
-try:
-    x = tf.randn((16, 64))
-    output = runtime.predict(x)
-except RuntimeLimitError as e:
-    print(f"Request violated resource constraints: {e}")
-except RuntimeBusyError as e:
-    print(f"Runtime is currently at peak capacity: {e}")
-```
+# 2. Configure dynamic batching
+config = SchedulerConfig(
+    max_batch_size=32,
+    max_queue_size=128,
+    batch_timeout_ms=2.0,
+    policy=SchedulingPolicy.FIFO,
+)
 
-### 2. Inspecting Operational Diagnostics & Health
+# 3. Initialize scheduler
+scheduler = InferenceScheduler(runtime, config=config)
 
-```python
-health = runtime.health()
-print(f"Status: {health['status']}, Lifecycle: {health['lifecycle_state']}")
-print(f"Active Requests: {health['active_requests']} / Max: {health['max_concurrent_requests']}")
-print(f"Total Completed: {health['completed_requests']}, Rejected: {health['rejected_requests']}")
+# 4. Synchronous prediction
+x = tf.randn((2, 64))
+out = scheduler.predict(x)
+
+# 5. Asynchronous submission
+future = scheduler.submit(x)
+out = future.result(timeout=1.0)
+
+# 6. Shutdown
+scheduler.close()
+runtime.close()
 ```
 
 ---
@@ -128,34 +119,12 @@ print(f"Total Completed: {health['completed_requests']}, Rejected: {health['reje
 ```
 TensorForge/
 ├── native/                          # Native C++17 Runtime Subsystem
-│   ├── CMakeLists.txt               # CMake build configuration
-│   ├── include/tensorforge/         # Public C++ headers
-│   │   ├── allocator.hpp            # 64-byte aligned CPU allocator
-│   │   ├── arena.hpp                # 64-byte aligned workspace arena
-│   │   ├── thread_pool.hpp          # C++17 inference ThreadPool
-│   │   ├── dtype.hpp                # DType enum & traits
-│   │   ├── kernels.hpp              # Parallel CPU compute kernels
-│   │   ├── shape.hpp                # Shape & contiguous stride math
-│   │   ├── storage.hpp              # Native Storage buffer
-│   │   └── tensor.hpp               # Native Tensor abstraction
-│   ├── src/                         # Native implementations & pybind11 bindings
-│   │   ├── allocator.cpp
-│   │   ├── arena.cpp                # WorkspaceArena implementation
-│   │   ├── thread_pool.cpp          # ThreadPool implementation & synchronization
-│   │   ├── bindings.cpp             # pybind11 module bindings
-│   │   ├── dtype.cpp
-│   │   ├── kernels.cpp              # Multi-threaded parallel compute kernels
-│   │   ├── shape.cpp
-│   │   ├── storage.cpp
-│   │   └── tensor.cpp
-│   └── tests/
-│       └── test_native.cpp          # Standalone C++ test suite
-│
 ├── tensorforge/
-│   ├── __init__.py                  # Top-level exports & version (1.5.0)
-│   ├── inference/                   # Production Inference, Compiler, Safety & Profiler
+│   ├── __init__.py                  # Top-level exports & version (1.6.0)
+│   ├── inference/                   # Production Inference, Compiler, Safety & Scheduler
 │   │   ├── __init__.py              # Public inference exports
-│   │   ├── limits.py                # NEW: RuntimeLimits & RuntimeState
+│   │   ├── scheduler.py             # NEW: InferenceScheduler, SchedulerConfig, InferenceFuture
+│   │   ├── limits.py                # RuntimeLimits & RuntimeState
 │   │   ├── context.py               # ExecutionContext (with request_id) & ExecutionContextPool
 │   │   ├── profiler.py              # ProfileEvent, ProfileSession, RuntimeProfiler, PerformanceReport
 │   │   ├── compiler.py              # InferenceCompiler & thread-safe CompiledPlanCache
@@ -177,42 +146,15 @@ TensorForge/
 │   └── utils/                       # Validation & Exception hierarchy
 │
 ├── tests/                           # Python Test Suite
-│   ├── inference/                   # Inference, Safety, Reliability & Observability tests
-│   │   ├── test_runtime_limits.py   # NEW: RuntimeLimits configuration & enforcement
-│   │   ├── test_runtime_errors.py   # NEW: Exception hierarchy & inheritance
-│   │   ├── test_request_isolation.py# NEW: Request ID & context isolation
-│   │   ├── test_resource_protection.py # NEW: Workspace memory limit protection
-│   │   ├── test_concurrent_limits.py# NEW: Concurrency limits & RuntimeBusyError
-│   │   ├── test_runtime_shutdown.py # NEW: Lifecycle transitions & graceful shutdown
-│   │   ├── test_failure_recovery.py # NEW: Fault tolerance & recovery after failures
-│   │   ├── test_input_validation.py # NEW: Comprehensive input validation checks
-│   │   ├── test_profiler.py
-│   │   ├── test_profile_session.py
-│   │   ├── test_latency_stats.py
-│   │   ├── test_backend_stats.py
-│   │   ├── test_memory_stats.py
-│   │   ├── test_compiler_stats.py
-│   │   ├── test_concurrent_profiling.py
-│   │   ├── test_profiling_overhead.py
-│   │   ├── test_concurrency.py
-│   │   ├── test_runtime_lifecycle.py
-│   │   ├── test_memory_lifetime.py
-│   │   ├── test_thread_pool.py
-│   │   ├── test_parallel_kernels.py
-│   │   ├── test_parallel_runtime.py
-│   │   ├── test_compiler.py
-│   │   ├── test_shapes.py
-│   │   ├── test_memory_planner.py
-│   │   ├── test_compiled_runtime.py
-│   │   ├── test_fusion.py
-│   │   ├── test_fused_correctness.py
-│   │   ├── test_fused_backend_dispatch.py
-│   │   ├── test_loader.py
-│   │   ├── test_runtime.py
-│   │   ├── test_fp32_inference.py
-│   │   ├── test_backend_dispatch.py
-│   │   ├── test_inference_no_grad.py
-│   │   └── test_quantized_inference.py
+│   ├── inference/                   # Inference, Safety, Reliability & Scheduling tests
+│   │   ├── test_scheduler.py        # NEW: Basic scheduler construction & predict
+│   │   ├── test_dynamic_batching.py # NEW: Dynamic batch assembly & demultiplexing
+│   │   ├── test_scheduler_queue.py  # NEW: Bounded queue & backpressure rejection
+│   │   ├── test_scheduler_shutdown.py # NEW: Draining lifecycle & close
+│   │   ├── test_scheduler_failure_recovery.py # NEW: Fault tolerance across batches
+│   │   ├── test_scheduler_concurrency.py # NEW: Multi-producer concurrent submissions
+│   │   ├── test_scheduler_statistics.py # NEW: Health & stats telemetry
+│   │   └── test_scheduler_backend.py # NEW: Compiled & quantized runtime integration
 │   ├── serialization/
 │   ├── quantization/
 │   ├── backend/
@@ -221,23 +163,15 @@ TensorForge/
 │   └── optim/
 │
 ├── examples/                        # Demonstrations
-│   ├── production_runtime_demo.py   # NEW: Comprehensive production safety demo
+│   ├── dynamic_batching_demo.py     # NEW: Dynamic batching and scheduler demo
+│   ├── production_runtime_demo.py
 │   ├── profiling_demo.py
-│   ├── concurrent_inference_demo.py
-│   ├── parallel_inference_demo.py
-│   ├── compiled_inference_demo.py
-│   ├── inference_demo.py
-│   ├── serialization_demo.py
-│   ├── quantization_demo.py
-│   └── training_demo.py
+│   └── concurrent_inference_demo.py
 │
 ├── benchmarks/                      # Performance Benchmarks
-│   ├── runtime_safety_overhead.py   # NEW: Safety & admission control overhead benchmark
-│   ├── profiling_overhead.py
-│   ├── concurrent_inference.py
-│   ├── benchmark_inference.py
-│   ├── benchmark_quantization.py
-│   └── benchmark_matmul.py
+│   ├── dynamic_batching_benchmark.py # NEW: Dynamic batching vs direct benchmark
+│   ├── runtime_safety_overhead.py
+│   └── profiling_overhead.py
 │
 ├── README.md
 ├── pyproject.toml
@@ -265,3 +199,4 @@ TensorForge/
 | **v1.3 – Production Runtime Reliability & Concurrency** | **Complete** | Thread-safe InferenceRuntime, ExecutionContext pool, workspace isolation, lifecycle APIs, diagnostics |
 | **v1.4 – Runtime Observability & Performance Diagnostics** | **Complete** | Profiler subsystem, ProfileEvent, ProfileSession, PerformanceReport, latency percentiles, low overhead |
 | **v1.5 – Production Reliability, Resource Management & Runtime Safety** | **Complete** | RuntimeLimits, admission control, input validation, request IDs, failure recovery, graceful shutdown |
+| **v1.6 – Production Inference Scheduling & Dynamic Batching** | **Complete** | InferenceScheduler, SchedulerConfig, dynamic batching, result demultiplexing, queue backpressure |

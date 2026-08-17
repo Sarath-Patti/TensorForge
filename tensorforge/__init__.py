@@ -17,12 +17,11 @@ from tensorforge.inference import (
     ExecutionContext,
     ExecutionContextPool,
     ExecutionPlan,
-    ExecutionStep,
-    GraphOptimizer,
-    InferenceCompiler,
+    InferenceFuture,
     InferenceGraph,
     InferenceNode,
     InferenceRuntime,
+    InferenceScheduler,
     MemoryPlan,
     MemoryPlanner,
     MemoryRegion,
@@ -35,6 +34,8 @@ from tensorforge.inference import (
     RuntimeLimits,
     RuntimeProfiler,
     RuntimeState,
+    SchedulerConfig,
+    SchedulingPolicy,
     ShapePropagator,
 )
 from tensorforge.quantization import (
@@ -116,6 +117,9 @@ from tensorforge.utils.validation import (
     RuntimeResourceError,
     RuntimeStateError,
     RuntimeTimeoutError,
+    SchedulerClosedError,
+    SchedulerError,
+    SchedulerQueueFullError,
     SerializationError,
     ShapeError,
     StorageError,
@@ -123,7 +127,7 @@ from tensorforge.utils.validation import (
     TensorForgeInputError,
 )
 
-__version__ = "1.5.0"
+__version__ = "1.6.0"
 
 __all__ = [
     "__version__",
@@ -171,6 +175,10 @@ __all__ = [
     "PerformanceReport",
     "RuntimeLimits",
     "RuntimeState",
+    "InferenceScheduler",
+    "SchedulerConfig",
+    "SchedulingPolicy",
+    "InferenceFuture",
     # Serialization
     "save_model",
     "load_model",
@@ -252,6 +260,9 @@ __all__ = [
     "RuntimeBusyError",
     "RuntimeResourceError",
     "RuntimeTimeoutError",
+    "SchedulerError",
+    "SchedulerQueueFullError",
+    "SchedulerClosedError",
     "ExecutionContextError",
     "ConcurrencyError",
 ]

@@ -11,6 +11,14 @@ from tensorforge.inference.optimizer import GraphOptimizer
 from tensorforge.inference.plan import ExecutionPlan, ExecutionStep
 from tensorforge.inference.profiler import PerformanceReport, ProfileEvent, ProfileSession, RuntimeProfiler
 from tensorforge.inference.runtime import InferenceRuntime
+from tensorforge.inference.scheduler import (
+    InferenceFuture,
+    InferenceRequest,
+    InferenceScheduler,
+    SchedulerConfig,
+    SchedulerLifecycleState,
+    SchedulingPolicy,
+)
 from tensorforge.inference.shapes import ShapePropagator
 
 __all__ = [
@@ -38,4 +46,10 @@ __all__ = [
     "PerformanceReport",
     "RuntimeLimits",
     "RuntimeState",
+    "InferenceScheduler",
+    "SchedulerConfig",
+    "SchedulingPolicy",
+    "SchedulerLifecycleState",
+    "InferenceFuture",
+    "InferenceRequest",
 ]

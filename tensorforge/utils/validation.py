@@ -77,6 +77,18 @@ class ConcurrencyError(TensorForgeError, RuntimeError):
     """Raised when a concurrency violation or race condition occurs."""
 
 
+class SchedulerError(TensorForgeError, RuntimeError):
+    """Raised when an inference scheduler operation fails."""
+
+
+class SchedulerQueueFullError(SchedulerError, RuntimeBusyError):
+    """Raised when the scheduler request queue is at maximum capacity."""
+
+
+class SchedulerClosedError(SchedulerError, RuntimeClosedError):
+    """Raised when an operation is attempted on a closed or draining InferenceScheduler."""
+
+
 def validate_shape(shape: Any) -> Tuple[int, ...]:
     """Validate and normalize a shape specification.
 
