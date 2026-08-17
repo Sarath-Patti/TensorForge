@@ -1,4 +1,4 @@
-"""TensorForge Production Inference Runtime, Compiler, Memory Planner & Concurrency Subsystem."""
+"""TensorForge Production Inference Runtime, Compiler, Memory Planner, Concurrency & Profiling Subsystem."""
 
 from tensorforge.inference.compiler import CompiledPlanCache, InferenceCompiler
 from tensorforge.inference.context import ExecutionContext, ExecutionContextPool
@@ -8,6 +8,7 @@ from tensorforge.inference.loader import ModelLoader
 from tensorforge.inference.memory import BufferLifetime, MemoryPlan, MemoryPlanner, MemoryRegion, PlannedBuffer
 from tensorforge.inference.optimizer import GraphOptimizer
 from tensorforge.inference.plan import ExecutionPlan, ExecutionStep
+from tensorforge.inference.profiler import PerformanceReport, ProfileEvent, ProfileSession, RuntimeProfiler
 from tensorforge.inference.runtime import InferenceRuntime
 from tensorforge.inference.shapes import ShapePropagator
 
@@ -30,4 +31,8 @@ __all__ = [
     "PlannedBuffer",
     "ShapePropagator",
     "CompiledPlanCache",
+    "RuntimeProfiler",
+    "ProfileSession",
+    "ProfileEvent",
+    "PerformanceReport",
 ]

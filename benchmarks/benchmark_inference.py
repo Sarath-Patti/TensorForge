@@ -27,9 +27,10 @@ def benchmark_inference(
     thread_counts=[1, 2, 4, 8],
     num_warmup=15,
     num_repeats=50,
+    enable_profiling=False,
 ):
     print("=" * 125)
-    print("TensorForge v1.2: Memory Optimization & Parallel CPU Execution Benchmark")
+    print(f"TensorForge v1.4: Production Inference, Parallel CPU & Telemetry Benchmark (Profiling={enable_profiling})")
     native_avail = is_native_available()
     print(f"Native C++ Backend Available: {native_avail}")
     print("=" * 125)

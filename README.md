@@ -4,10 +4,10 @@
 
 ---
 
-## Current Milestone: `v1.3 – Production Runtime Reliability & Concurrency`
+## Current Milestone: `v1.4 – Runtime Observability & Performance Diagnostics`
 
-> **Development Status:** `v1.3 (Production Release)`
-> TensorForge v1.3 delivers complete multi-threaded concurrency safety and production reliability for the inference runtime. Multiple Python threads can now execute `predict()` simultaneously against a single `InferenceRuntime` instance with zero data races, deterministic numerical outputs, per-prediction workspace memory isolation (`ExecutionContext`, `ExecutionContextPool`), RAII lifecycle management (`close()`, context-manager support), and lightweight operational diagnostics (`health()`, `stats()`).
+> **Development Status:** `v1.4 (Production Release)`
+> TensorForge v1.4 introduces a production-grade inference profiler and observability subsystem. It provides high-resolution monotonic execution timing, per-operator performance breakdown, backend execution analytics (Native vs NumPy), latency distribution percentiles (min, max, mean, p50, p95, p99), throughput telemetry, compiler cache efficiency tracking, and workspace memory telemetry. Profiling is **disabled by default** with near-zero overhead on the hot prediction path.
 
 ---
 
@@ -45,28 +45,35 @@ Inference Compiler (InferenceCompiler, CompiledPlanCache)
 Execution Plan IR (Immutable ExecutionPlan, MemoryRegions, Parallel Flags)
   │
   ▼
-Thread-Safe Inference Runtime (InferenceRuntime, ContextPool, ThreadPool)
+Thread-Safe Inference Runtime & Telemetry (InferenceRuntime, ContextPool, ThreadPool)
   ├── Per-Prediction ExecutionContext & Workspace Isolation (ExecutionContext)
   ├── Multi-Threaded Concurrent Serving (ThreadPoolExecutor-safe)
   ├── Dynamic Thread Configuration (set_num_threads)
   ├── Deterministic Lifecycle Management (close, context manager)
-  └── Operational Health & Diagnostics (health, stats)
+  ├── Operational Health & Diagnostics (health, stats)
+  └── High-Resolution Telemetry & Profiler (RuntimeProfiler, ProfileEvent, ProfileSession, PerformanceReport)
 ```
 
 ---
 
 ## Key Features & Subsystems
 
-### 1. Per-Prediction Execution Context & Workspace Pool (`tensorforge/inference/context.py`)
+### 1. Runtime Profiler & Performance Telemetry (`tensorforge/inference/profiler.py`)
+- **`RuntimeProfiler`:** Thread-safe manager handling monotonic nanosecond timing, bounded latency history ring buffers, operator statistics, backend operation distribution, and compiler cache hit/miss tracking.
+- **`ProfileEvent`:** Lightweight event descriptor recording operator name, op_type, backend, execution mode, timestamps, duration, shapes, dtype, batch size, estimated FLOPs, workspace bytes, thread count, and context ID.
+- **`ProfileSession`:** Context manager for scoped profiling sessions with automatic state restoration.
+- **`PerformanceReport`:** Rich diagnostic report providing formatted text summaries, operation breakdowns, backend distributions, latency percentiles, memory telemetry, and compiler cache analytics.
+
+### 2. Low-Overhead Observability Modes
+- **Disabled by Default:** Zero event allocations and zero hot-path synchronization when profiling is disabled.
+- **Summary Mode (`runtime.enable_profiling(detailed=False)`):** Collects aggregate latency statistics and backend counters with minimal overhead.
+- **Detailed Mode (`runtime.enable_profiling(detailed=True)`):** Captures fine-grained per-step execution events across eager, fused, and compiled kernels.
+
+### 3. Per-Prediction Execution Context & Workspace Pool (`tensorforge/inference/context.py`)
 - **`ExecutionContext`:** Provides an isolated, per-prediction execution workspace and buffer slot manager. Intermediate activations are never shared between concurrent `predict()` calls.
 - **`ExecutionContextPool`:** Thread-safe object pool managing reusable contexts using a fast, synchronized LIFO queue, avoiding memory allocation churn during high-throughput multi-threaded serving.
 
-### 2. Thread-Safe Concurrent Runtime (`tensorforge/inference/runtime.py`)
-- **Multi-Threaded Serving:** Multiple threads can invoke `runtime.predict()` simultaneously without data races or corruption.
-- **Immutable Weights:** Model parameters are strictly read-only and never duplicated or mutated during inference.
-- **Lock-Free Prediction Path:** Predictions run concurrently without global serialization locks.
-
-### 3. Lifecycle & Resource Management
+### 4. Lifecycle & Resource Management
 - **Context Manager Support:**
   ```python
   with InferenceRuntime.load("model.tfmodel") as runtime:
@@ -76,15 +83,46 @@ Thread-Safe Inference Runtime (InferenceRuntime, ContextPool, ThreadPool)
 - **Explicit Lifecycle:** `runtime.close()`, `runtime.is_closed`, and `runtime.closed`.
 - **Fail-Safe Exceptions:** Attempting to predict on a closed runtime raises `RuntimeClosedError`.
 
-### 4. Operational Health & Diagnostics
-- **`runtime.health()`:** Returns status (`"healthy"` / `"closed"`), active and pooled contexts, prediction count, error count, and thread configurations.
-- **`runtime.stats()`:** Returns extended memory, parameter, and execution metrics.
+### 5. Operational Health & Diagnostics
+- **`runtime.health()`:** Returns status (`"healthy"` / `"closed"`), active and pooled contexts, prediction count, error count, mean latency, p95 latency, and throughput.
+- **`runtime.stats()`:** Returns extended memory, parameter, execution, compiler, and latency distribution metrics.
 
 ---
 
 ## Inference Runtime Usage Examples
 
-### 1. Concurrent Multi-Threaded Serving
+### 1. Enabling Profiling & Printing Performance Report
+
+```python
+import tensorforge as tf
+from tensorforge.inference import InferenceRuntime
+
+# 1. Load and compile model
+runtime = InferenceRuntime.load("classifier.tfmodel").compile(input_shape=(16, 32))
+
+# 2. Enable detailed profiling
+runtime.enable_profiling(detailed=True)
+
+# 3. Execute inference requests
+for _ in range(50):
+    output = runtime.predict(tf.randn((16, 32)))
+
+# 4. Generate and print performance report
+report = runtime.profile()
+print(report.summary())
+```
+
+### 2. Scoped Profiling Sessions
+
+```python
+with runtime.profile_session(detailed=True) as session:
+    output = runtime.predict(x)
+
+print(f"Session latency: {session.duration_ms:.3f} ms")
+print(session.summary())
+```
+
+### 3. Concurrent Multi-Threaded Serving with Observability
 
 ```python
 from concurrent.futures import ThreadPoolExecutor
@@ -95,57 +133,22 @@ from tensorforge.inference import InferenceRuntime
 with InferenceRuntime.load("classifier.tfmodel") as runtime:
     runtime.set_num_threads(4)
     runtime.compile(input_shape=(16, 32))
+    runtime.enable_profiling(detailed=False)
 
     # 2. Dispatch concurrent predictions from multiple worker threads
     batches = [tf.randn((16, 32)) for _ in range(20)]
-
-    with ThreadPoolExecutor(max_workers=8) as executor:
+    with ThreadPoolExecutor(max_workers=4) as executor:
         results = list(executor.map(runtime.predict, batches))
 
-    # 3. Inspect runtime health and metrics
-    print("Runtime Health:", runtime.health())
-```
-
-### 2. Inspecting Memory and Concurrency Diagnostics
-
-```python
-stats = runtime.stats()
-print(f"Total Predictions: {stats['prediction_count']}")
-print(f"Active Contexts:   {stats['active_contexts']}")
-print(f"Pooled Contexts:   {stats['pooled_contexts']}")
-print(f"Workspace Memory:  {stats['workspace_bytes']} bytes")
+    # 3. Inspect concurrent latency statistics
+    stats = runtime.latency_stats()
+    print(f"Mean Latency: {stats['mean_ms']:.4f} ms, P95: {stats['p95_ms']:.4f} ms")
+    print(f"Throughput:   {stats['throughput_samples_per_sec']:.1f} samples/sec")
 ```
 
 ---
 
-## Running Benchmarks & Demonstrations
-
-```bash
-# Concurrent multi-threaded inference demonstration
-python examples/concurrent_inference_demo.py
-
-# Multi-worker concurrency and throughput benchmark
-python benchmarks/concurrent_inference.py
-
-# Multi-thread scaling benchmark (1, 2, 4, 8 native threads)
-python benchmarks/benchmark_inference.py
-
-# Compiled inference demonstration
-python examples/compiled_inference_demo.py
-
-# Operator fusion demonstration
-python examples/inference_demo.py
-
-# Model serialization demonstration
-python examples/serialization_demo.py
-
-# INT8 Quantization demonstration
-python examples/quantization_demo.py
-```
-
----
-
-## Project Structure
+## Package Structure
 
 ```
 TensorForge/
@@ -174,10 +177,11 @@ TensorForge/
 │       └── test_native.cpp          # Standalone C++ test suite
 │
 ├── tensorforge/
-│   ├── __init__.py                  # Top-level exports & version (1.3.0)
-│   ├── inference/                   # Production Inference, Compiler & Concurrency Subsystem
+│   ├── __init__.py                  # Top-level exports & version (1.4.0)
+│   ├── inference/                   # Production Inference, Compiler, Concurrency & Profiler
 │   │   ├── __init__.py              # Public inference exports
-│   │   ├── context.py               # NEW: ExecutionContext & ExecutionContextPool
+│   │   ├── profiler.py              # NEW: ProfileEvent, ProfileSession, RuntimeProfiler, PerformanceReport
+│   │   ├── context.py               # ExecutionContext & ExecutionContextPool
 │   │   ├── compiler.py              # InferenceCompiler & thread-safe CompiledPlanCache
 │   │   ├── plan.py                  # Immutable ExecutionPlan & ExecutionStep IR
 │   │   ├── shapes.py                # Static ShapePropagator engine
@@ -185,7 +189,7 @@ TensorForge/
 │   │   ├── graph.py                 # InferenceGraph and InferenceNode representations
 │   │   ├── fusion.py                # OperatorFusionPass pattern matching engine
 │   │   ├── optimizer.py             # GraphOptimizer execution dispatcher
-│   │   ├── runtime.py               # InferenceRuntime (thread-safe predict, lifecycle, health)
+│   │   ├── runtime.py               # InferenceRuntime (thread-safe predict, lifecycle, profiler)
 │   │   └── loader.py                # ModelLoader & architecture reconstitution
 │   ├── serialization/               # Model Serialization Subsystem (.tfmodel, .tfckpt)
 │   ├── quantization/                # Quantization Subsystem (INT8, Calibration, qmatmul)
@@ -197,9 +201,17 @@ TensorForge/
 │   └── utils/                       # Validation & Exception hierarchy
 │
 ├── tests/                           # Python Test Suite
-│   ├── inference/                   # Inference, Concurrency & Lifecycle test suite
-│   │   ├── test_concurrency.py      # NEW: Concurrent multi-threaded prediction tests
-│   │   ├── test_runtime_lifecycle.py# NEW: Lifecycle, close(), health(), and stats() tests
+│   ├── inference/                   # Inference, Concurrency & Observability test suite
+│   │   ├── test_profiler.py         # NEW: ProfileEvent, RuntimeProfiler modes & operations
+│   │   ├── test_profile_session.py  # NEW: Scoped ProfileSession & state restoration
+│   │   ├── test_latency_stats.py    # NEW: Latency distribution percentiles & throughput
+│   │   ├── test_backend_stats.py    # NEW: Backend execution counters & fallbacks
+│   │   ├── test_memory_stats.py     # NEW: Workspace memory & region telemetry
+│   │   ├── test_compiler_stats.py   # NEW: Compiler cache hits, misses & times
+│   │   ├── test_concurrent_profiling.py # NEW: Thread safety under concurrent predict()
+│   │   ├── test_profiling_overhead.py   # NEW: Zero overhead disabled mode verification
+│   │   ├── test_concurrency.py
+│   │   ├── test_runtime_lifecycle.py
 │   │   ├── test_memory_lifetime.py
 │   │   ├── test_thread_pool.py
 │   │   ├── test_parallel_kernels.py
@@ -225,7 +237,8 @@ TensorForge/
 │   └── optim/
 │
 ├── examples/                        # Demonstrations
-│   ├── concurrent_inference_demo.py # NEW: Multi-worker concurrent inference demo
+│   ├── profiling_demo.py            # NEW: Observability, sessions & performance reports
+│   ├── concurrent_inference_demo.py
 │   ├── parallel_inference_demo.py
 │   ├── compiled_inference_demo.py
 │   ├── inference_demo.py
@@ -234,7 +247,8 @@ TensorForge/
 │   └── training_demo.py
 │
 ├── benchmarks/                      # Performance Benchmarks
-│   ├── concurrent_inference.py      # NEW: Multi-worker concurrency benchmark
+│   ├── profiling_overhead.py        # NEW: Profiling overhead across batch sizes
+│   ├── concurrent_inference.py
 │   ├── benchmark_inference.py
 │   ├── benchmark_quantization.py
 │   └── benchmark_matmul.py
@@ -263,3 +277,4 @@ TensorForge/
 | **v1.1 – Inference Compiler & Execution Planning** | **Complete** | InferenceCompiler, ExecutionPlan IR, static shape propagation, memory planner, native arena, plan caching |
 | **v1.2 – Runtime Memory Optimization & Parallel CPU Execution** | **Complete** | Interval memory planner, MemoryRegions, native ThreadPool, parallel CPU kernels, thread scaling |
 | **v1.3 – Production Runtime Reliability & Concurrency** | **Complete** | Thread-safe InferenceRuntime, ExecutionContext pool, workspace isolation, lifecycle APIs, diagnostics |
+| **v1.4 – Runtime Observability & Performance Diagnostics** | **Complete** | Profiler subsystem, ProfileEvent, ProfileSession, PerformanceReport, latency percentiles, low overhead |

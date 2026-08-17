@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from typing import Any, Dict, Optional, Tuple, Union
 import numpy as np
 
@@ -93,6 +94,7 @@ class InferenceCompiler:
         is_quantized: bool = False,
         num_threads: Optional[int] = None,
         use_cache: bool = True,
+        profiler: Optional[Any] = None,
     ) -> ExecutionPlan:
         """Compile an InferenceGraph for a specified input shape, backend, and CPU thread count.
 
@@ -104,10 +106,12 @@ class InferenceCompiler:
             is_quantized: Whether graph operates in INT8 quantization mode.
             num_threads: Number of CPU threads to configure for execution.
             use_cache: Whether to retrieve or store compiled plans in the plan cache.
+            profiler: Optional RuntimeProfiler to record compilation performance events.
 
         Returns:
             Pre-resolved, deterministic ExecutionPlan.
         """
+        start_ns = time.perf_counter_ns()
         resolved_dtype = to_dtype(dtype)
         target_backend = backend if backend is not None else get_backend()
         target_threads = num_threads if num_threads is not None else get_num_threads()
@@ -123,6 +127,8 @@ class InferenceCompiler:
                 num_threads=target_threads,
             )
             if cached_plan is not None:
+                if profiler is not None:
+                    profiler.record_compiler_event(cache_hit=True, cached_plans=len(cls._global_cache))
                 return cached_plan
 
         # 1. Static Shape Propagation
@@ -200,6 +206,14 @@ class InferenceCompiler:
                 num_threads=target_threads,
             )
 
+        if profiler is not None:
+            compile_time_ns = time.perf_counter_ns() - start_ns
+            profiler.record_compiler_event(
+                cache_hit=False,
+                compilation_time_ns=compile_time_ns,
+                cached_plans=len(cls._global_cache),
+            )
+
         return plan
 
     @classmethod
@@ -263,20 +277,24 @@ class InferenceCompiler:
         plan: ExecutionPlan,
         input_tensor: Tensor,
         context: Optional[ExecutionContext] = None,
+        profiler: Optional[Any] = None,
     ) -> Tensor:
-        """Execute a compiled ExecutionPlan on an incoming Tensor using an isolated ExecutionContext.
+        """Execute a compiled ExecutionPlan against an input tensor using isolated workspace slots.
 
-        Reuses planned memory slots to eliminate allocation overhead while ensuring strict
+        When an `ExecutionContext` is provided, intermediate activation buffers are allocated
+        and stored strictly within `context.slots`, preserving memory safety and thread-level
         concurrency isolation across threads.
 
         Args:
             plan: Pre-compiled ExecutionPlan.
             input_tensor: Input Tensor matching plan input shape.
             context: Per-prediction ExecutionContext holding isolated workspace slots.
+            profiler: Optional RuntimeProfiler to record per-step execution telemetry.
 
         Returns:
             Output Tensor resulting from executing all compiled steps.
         """
+        is_detailed = profiler is not None and getattr(profiler, "is_detailed", False)
         # Workspace memory slots (isolated per-context or local dictionary)
         slots: Dict[int, Tensor] = context.slots if context is not None else {}
 
@@ -288,7 +306,40 @@ class InferenceCompiler:
                 step_in = slots[step.input_slot]
 
             # 2. Execute Step Kernel
-            step_out = cls._execute_step(step, step_in)
+            if is_detailed:
+                t0 = time.perf_counter_ns()
+                step_out = cls._execute_step(step, step_in)
+                t1 = time.perf_counter_ns()
+                duration_ns = t1 - t0
+
+                from tensorforge.inference.profiler import ProfileEvent
+                event = ProfileEvent(
+                    name=f"step_{step.step_index}_{step.op_type}",
+                    op_type=step.op_type,
+                    backend=step.backend_dispatch,
+                    mode="compiled",
+                    start_time_ns=t0,
+                    end_time_ns=t1,
+                    input_shape=step.input_shape,
+                    output_shape=step.output_shape,
+                    dtype=step.dtype.name if hasattr(step.dtype, "name") else str(step.dtype),
+                    batch_size=step.input_shape[0] if step.input_shape else 1,
+                    estimated_flops=step.estimated_flops,
+                    workspace_bytes=plan.total_workspace_bytes,
+                    num_threads=step.num_threads,
+                    is_fused=(step.op_type == "FusedLinear"),
+                    is_compiled=True,
+                    context_id=context.context_id if context is not None else 0,
+                    extra=step.attrs,
+                )
+                profiler.record_event(event)
+                profiler.record_backend_op(
+                    backend_dispatch=step.backend_dispatch,
+                    duration_ns=duration_ns,
+                    is_fused=(step.op_type == "FusedLinear"),
+                )
+            else:
+                step_out = cls._execute_step(step, step_in)
 
             # 3. Store into Output Slot
             slots[step.output_slot] = step_out

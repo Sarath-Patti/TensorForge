@@ -28,7 +28,11 @@ from tensorforge.inference import (
     MemoryRegion,
     ModelLoader,
     OperatorFusionPass,
+    PerformanceReport,
     PlannedBuffer,
+    ProfileEvent,
+    ProfileSession,
+    RuntimeProfiler,
     ShapePropagator,
 )
 from tensorforge.quantization import (
@@ -111,7 +115,7 @@ from tensorforge.utils.validation import (
     TensorForgeError,
 )
 
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 
 __all__ = [
     "__version__",
@@ -134,7 +138,7 @@ __all__ = [
     "randn",
     "arange",
     "from_numpy",
-    # Inference Compiler, Memory Planning & Concurrency
+    # Inference Compiler, Memory Planning, Concurrency & Profiling
     "InferenceRuntime",
     "ModelLoader",
     "InferenceGraph",
@@ -153,6 +157,10 @@ __all__ = [
     "PlannedBuffer",
     "ShapePropagator",
     "CompiledPlanCache",
+    "RuntimeProfiler",
+    "ProfileSession",
+    "ProfileEvent",
+    "PerformanceReport",
     # Serialization
     "save_model",
     "load_model",

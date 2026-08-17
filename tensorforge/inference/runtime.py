@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 import numpy as np
 
@@ -22,6 +23,7 @@ from tensorforge.inference.loader import ModelLoader
 from tensorforge.inference.memory import MemoryPlan
 from tensorforge.inference.optimizer import GraphOptimizer
 from tensorforge.inference.plan import ExecutionPlan
+from tensorforge.inference.profiler import PerformanceReport, ProfileEvent, ProfileSession, RuntimeProfiler
 from tensorforge.nn.linear import Linear
 from tensorforge.nn.module import Module
 from tensorforge.nn.sequential import Sequential
@@ -99,6 +101,9 @@ class InferenceRuntime:
         self._compiled_plan: Optional[ExecutionPlan] = None
         self._is_compiled: bool = False
         self._arena: Optional[Any] = None
+
+        # Profiler and telemetry state
+        self._profiler: RuntimeProfiler = RuntimeProfiler()
 
         # Thread-safe execution context pool & concurrency locks
         self._context_pool: ExecutionContextPool = ExecutionContextPool()
@@ -285,6 +290,7 @@ class InferenceRuntime:
                 is_quantized=self._is_quantized,
                 num_threads=target_threads,
                 use_cache=use_cache,
+                profiler=self._profiler,
             )
 
             self._is_compiled = True
@@ -297,6 +303,132 @@ class InferenceRuntime:
                     self._arena = _native.WorkspaceArena(ws_bytes)
 
         return self
+
+    # -------------------------------------------------------------------------
+    # Observability & Profiling API (v1.4)
+    # -------------------------------------------------------------------------
+
+    def enable_profiling(self, detailed: bool = False) -> InferenceRuntime:
+        """Enable inference telemetry and runtime performance profiling.
+
+        Args:
+            detailed: Whether to record fine-grained per-operator execution events.
+
+        Returns:
+            Self (enables method chaining).
+
+        Raises:
+            RuntimeClosedError: If invoked on a closed InferenceRuntime.
+        """
+        with self._lifecycle_lock:
+            if self._is_closed:
+                raise RuntimeClosedError("Cannot enable profiling: InferenceRuntime has been closed.")
+        self._profiler.enable(detailed=detailed)
+        return self
+
+    def disable_profiling(self) -> InferenceRuntime:
+        """Disable inference runtime profiling and telemetry recording.
+
+        Returns:
+            Self (enables method chaining).
+        """
+        self._profiler.disable()
+        return self
+
+    @property
+    def profiling_enabled(self) -> bool:
+        """Check if profiling is currently active."""
+        return self._profiler.is_enabled
+
+    @property
+    def profiling_mode(self) -> str:
+        """Return active profiling mode string ('disabled', 'summary', or 'detailed')."""
+        return self._profiler.mode
+
+    def set_profile_history_size(self, size: int) -> InferenceRuntime:
+        """Configure the capacity of the bounded latency history buffer for percentile calculations.
+
+        Args:
+            size: Maximum number of latencies retained in memory (must be >= 10).
+
+        Returns:
+            Self (enables method chaining).
+        """
+        self._profiler.set_history_size(size)
+        return self
+
+    def profile(self) -> PerformanceReport:
+        """Generate a complete PerformanceReport containing latency, backend, operator, and memory diagnostics.
+
+        Returns:
+            Configured PerformanceReport instance.
+
+        Raises:
+            RuntimeClosedError: If invoked on a closed InferenceRuntime.
+        """
+        with self._lifecycle_lock:
+            if self._is_closed:
+                raise RuntimeClosedError("Cannot generate profile report: InferenceRuntime has been closed.")
+
+        mem_summary = {
+            "workspace_bytes": self.workspace_size,
+            "num_regions": self.memory_plan.num_regions if self.memory_plan is not None else 0,
+            "reused_buffers": self.memory_plan.num_reused_buffers if self.memory_plan is not None else 0,
+            "active_contexts": self.active_contexts,
+            "pooled_contexts": self._context_pool.total_count,
+        }
+        return self._profiler.generate_report(runtime_memory_stats=mem_summary)
+
+    def profile_events(self) -> List[ProfileEvent]:
+        """Return a list snapshot of all recorded ProfileEvent instances."""
+        return self._profiler.get_events()
+
+    def profile_session(self, detailed: bool = True) -> ProfileSession:
+        """Create a scoped context manager for profiling a specific block of predictions.
+
+        Example:
+            >>> with runtime.profile_session() as session:
+            ...     out = runtime.predict(x)
+            >>> print(session.summary())
+
+        Args:
+            detailed: Whether to record per-operator execution events.
+
+        Returns:
+            ProfileSession context manager.
+
+        Raises:
+            RuntimeClosedError: If invoked on a closed InferenceRuntime.
+        """
+        with self._lifecycle_lock:
+            if self._is_closed:
+                raise RuntimeClosedError("Cannot start profile session: InferenceRuntime has been closed.")
+        return ProfileSession(self._profiler, detailed=detailed)
+
+    def clear_profiler(self) -> InferenceRuntime:
+        """Reset and clear all collected profiling events and latency statistics.
+
+        Returns:
+            Self (enables method chaining).
+        """
+        self._profiler.clear()
+        return self
+
+    def reset_profiler(self) -> InferenceRuntime:
+        """Alias for clear_profiler()."""
+        return self.clear_profiler()
+
+    def backend_stats(self) -> Dict[str, Any]:
+        """Return backend execution telemetry."""
+        return self._profiler.backend_stats()
+
+    def compiler_stats(self) -> Dict[str, Any]:
+        """Return compiler cache and compilation telemetry."""
+        return self._profiler.compiler_stats()
+
+    def latency_stats(self) -> Dict[str, Any]:
+        """Return latency distribution percentiles and throughput."""
+        return self._profiler.latency_stats()
 
     @property
     def is_optimized(self) -> bool:
@@ -432,6 +564,8 @@ class InferenceRuntime:
             x = Tensor(np.asarray(input_data, dtype=np.float32), dtype=float32)
 
         target_backend = self.backend
+        is_prof = self._profiler.is_enabled
+        t0 = time.perf_counter_ns() if is_prof else 0
 
         try:
             with self._context_pool.acquire() as ctx:
@@ -441,7 +575,12 @@ class InferenceRuntime:
                         if self._is_compiled and self._compiled_plan is not None:
                             # Check shape compatibility
                             if x.shape == self._compiled_plan.input_shape:
-                                output = InferenceCompiler.execute_plan(self._compiled_plan, x, context=ctx)
+                                output = InferenceCompiler.execute_plan(
+                                    self._compiled_plan,
+                                    x,
+                                    context=ctx,
+                                    profiler=self._profiler,
+                                )
                             elif len(x.shape) == len(self._compiled_plan.input_shape) and x.shape[1:] == self._compiled_plan.input_shape[1:]:
                                 # Dynamic batch size recompilation (synchronized & cached)
                                 plan = InferenceCompiler.compile(
@@ -452,33 +591,143 @@ class InferenceRuntime:
                                     is_quantized=self._is_quantized,
                                     num_threads=self._num_threads,
                                     use_cache=True,
+                                    profiler=self._profiler,
                                 )
-                                output = InferenceCompiler.execute_plan(plan, x, context=ctx)
+                                output = InferenceCompiler.execute_plan(
+                                    plan,
+                                    x,
+                                    context=ctx,
+                                    profiler=self._profiler,
+                                )
                             else:
                                 # Fallback to eager optimized execution
+                                eager_t0 = time.perf_counter_ns() if is_prof else 0
                                 output = GraphOptimizer.execute(
                                     self.graph,
                                     x,
                                     backend=target_backend,
                                     is_quantized=self._is_quantized,
                                 )
+                                if is_prof:
+                                    dur = time.perf_counter_ns() - eager_t0
+                                    self._profiler.record_backend_op(
+                                        backend_dispatch=target_backend,
+                                        duration_ns=dur,
+                                        is_fused=True,
+                                    )
+                                    if self._profiler.is_detailed:
+                                        self._profiler.record_event(
+                                            ProfileEvent(
+                                                name="fused_graph_fallback",
+                                                op_type="FusedGraph",
+                                                backend=target_backend,
+                                                mode="fused",
+                                                start_time_ns=eager_t0,
+                                                end_time_ns=eager_t0 + dur,
+                                                input_shape=x.shape,
+                                                output_shape=output.shape,
+                                                dtype="float32",
+                                                batch_size=x.shape[0] if len(x.shape) >= 2 else 1,
+                                                is_fused=True,
+                                                is_compiled=False,
+                                            )
+                                        )
 
                         # 2. Optimized Graph Path
                         elif self._is_optimized and self._optimized_graph is not None:
+                            eager_t0 = time.perf_counter_ns() if is_prof else 0
                             output = GraphOptimizer.execute(
                                 self._optimized_graph,
                                 x,
                                 backend=target_backend,
                                 is_quantized=self._is_quantized,
                             )
+                            if is_prof:
+                                dur = time.perf_counter_ns() - eager_t0
+                                self._profiler.record_backend_op(
+                                    backend_dispatch=target_backend,
+                                    duration_ns=dur,
+                                    is_fused=True,
+                                )
+                                if self._profiler.is_detailed:
+                                    self._profiler.record_event(
+                                        ProfileEvent(
+                                            name="optimized_graph_forward",
+                                            op_type="OptimizedGraph",
+                                            backend=target_backend,
+                                            mode="fused",
+                                            start_time_ns=eager_t0,
+                                            end_time_ns=eager_t0 + dur,
+                                            input_shape=x.shape,
+                                            output_shape=output.shape,
+                                            dtype="float32",
+                                            batch_size=x.shape[0] if len(x.shape) >= 2 else 1,
+                                            is_fused=True,
+                                            is_compiled=False,
+                                        )
+                                    )
 
                         # 3. Quantized Eager Fallback Path
                         elif self._is_quantized:
+                            eager_t0 = time.perf_counter_ns() if is_prof else 0
                             output = self._predict_quantized(x)
+                            if is_prof:
+                                dur = time.perf_counter_ns() - eager_t0
+                                self._profiler.record_backend_op(
+                                    backend_dispatch="numpy",
+                                    duration_ns=dur,
+                                    is_fallback=True,
+                                )
+                                if self._profiler.is_detailed:
+                                    self._profiler.record_event(
+                                        ProfileEvent(
+                                            name="quantized_eager_forward",
+                                            op_type="QuantizedEager",
+                                            backend="numpy",
+                                            mode="eager",
+                                            start_time_ns=eager_t0,
+                                            end_time_ns=eager_t0 + dur,
+                                            input_shape=x.shape,
+                                            output_shape=output.shape,
+                                            dtype="int8",
+                                            batch_size=x.shape[0] if len(x.shape) >= 2 else 1,
+                                            is_fused=False,
+                                            is_compiled=False,
+                                        )
+                                    )
 
                         # 4. Standard Eager Path
                         else:
+                            eager_t0 = time.perf_counter_ns() if is_prof else 0
                             output = self._model(x)
+                            if is_prof:
+                                dur = time.perf_counter_ns() - eager_t0
+                                self._profiler.record_backend_op(
+                                    backend_dispatch="numpy",
+                                    duration_ns=dur,
+                                )
+                                if self._profiler.is_detailed:
+                                    self._profiler.record_event(
+                                        ProfileEvent(
+                                            name=f"eager_{type(self._model).__name__}",
+                                            op_type=type(self._model).__name__,
+                                            backend="numpy",
+                                            mode="eager",
+                                            start_time_ns=eager_t0,
+                                            end_time_ns=eager_t0 + dur,
+                                            input_shape=x.shape,
+                                            output_shape=output.shape,
+                                            dtype="float32",
+                                            batch_size=x.shape[0] if len(x.shape) >= 2 else 1,
+                                            is_fused=False,
+                                            is_compiled=False,
+                                        )
+                                    )
+
+            if is_prof:
+                t1 = time.perf_counter_ns()
+                batch_size = x.shape[0] if len(x.shape) >= 2 else 1
+                self._profiler.record_prediction(t1 - t0, batch_size=batch_size)
 
             with self._stats_lock:
                 self._prediction_count += 1
@@ -546,6 +795,7 @@ class InferenceRuntime:
             Dictionary containing health status, concurrency metrics, and error rates.
         """
         is_cls = self.is_closed
+        lat = self._profiler.latency_stats()
         return {
             "status": "closed" if is_cls else "healthy",
             "backend": self.backend,
@@ -553,22 +803,37 @@ class InferenceRuntime:
             "is_optimized": self._is_optimized,
             "is_quantized": self._is_quantized,
             "num_threads": self._num_threads,
+            "profiling_enabled": self._profiler.is_enabled,
+            "profiling_mode": self._profiler.mode,
             "active_contexts": self._context_pool.active_count,
             "pooled_contexts": self._context_pool.total_count,
             "idle_contexts": self._context_pool.idle_count,
             "prediction_count": self.prediction_count,
             "error_count": self.error_count,
+            "mean_latency_ms": lat.get("mean_ms", 0.0),
+            "p95_latency_ms": lat.get("p95_ms", 0.0),
+            "throughput_samples_per_sec": lat.get("throughput_samples_per_sec", 0.0),
         }
 
     def stats(self) -> Dict[str, Any]:
         """Generate an extended diagnostic and statistical report of runtime state."""
         summary = self.summary()
+        lat = self.latency_stats()
         summary.update({
             "health": self.health(),
             "active_contexts": self.active_contexts,
             "pooled_contexts": self._context_pool.total_count,
             "prediction_count": self.prediction_count,
             "error_count": self.error_count,
+            "profiling_enabled": self._profiler.is_enabled,
+            "profiling_mode": self._profiler.mode,
+            "total_inference_time_ms": lat.get("total_time_ms", 0.0),
+            "mean_latency_ms": lat.get("mean_ms", 0.0),
+            "p95_latency_ms": lat.get("p95_ms", 0.0),
+            "throughput": lat.get("throughput_samples_per_sec", 0.0),
+            "latency": lat,
+            "backend_stats": self.backend_stats(),
+            "compiler_stats": self.compiler_stats(),
         })
         return summary
 
@@ -611,7 +876,7 @@ class InferenceRuntime:
             "total_bytes": size_stats["total_bytes"],
             "size_kb": size_stats["size_kb"],
             "format_version": self._metadata.get("format_version", "1.0"),
-            "tensorforge_version": "1.3.0",
+            "tensorforge_version": "1.4.0",
         }
 
     def __repr__(self) -> str:
@@ -622,6 +887,8 @@ class InferenceRuntime:
             status_items.append(f"optimized ({self.fused_count} fused)")
         if self._is_compiled:
             status_items.append(f"compiled ({len(self._compiled_plan or [])} steps, ws={self.workspace_size}B, threads={self._num_threads})")
+        if self._profiler.is_enabled:
+            status_items.append(f"profiling={self._profiler.mode}")
 
         status_str = f", {', '.join(status_items)}" if status_items else ""
 
