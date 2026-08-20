@@ -45,12 +45,16 @@ from tensorforge.inference.scheduler import (
 )
 from tensorforge.inference.server import (
     InferenceServer,
+    ModelEndpoint,
     ModelEntry,
     ModelLifecycleState,
     ModelRegistry,
     ServerConfig,
     ServerLifecycleState,
 )
+from tensorforge.inference.client import InferenceClient, InferenceRequestContract
+from tensorforge.inference.manifest import DeploymentManifest, DeploymentSpec, ModelDeploymentSpec
+from tensorforge.inference.profile import RuntimeConfig, RuntimeProfile, RuntimeProfileType, get_runtime_profile
 from tensorforge.inference.shapes import ShapePropagator
 from tensorforge.utils.validation import (
     CircuitBreakerOpenError,
@@ -127,6 +131,7 @@ __all__ = [
     "ModelLifecycleState",
     "ServerLifecycleState",
     "ModelEntry",
+    "ModelEndpoint",
     "HealthState",
     "CircuitState",
     "RequestState",
@@ -158,4 +163,13 @@ __all__ = [
     "RuntimeResourceError",
     "RuntimeTimeoutError",
     "TensorForgeInputError",
+    "InferenceClient",
+    "InferenceRequestContract",
+    "RuntimeProfile",
+    "RuntimeProfileType",
+    "RuntimeConfig",
+    "get_runtime_profile",
+    "DeploymentManifest",
+    "ModelDeploymentSpec",
+    "DeploymentSpec",
 ]

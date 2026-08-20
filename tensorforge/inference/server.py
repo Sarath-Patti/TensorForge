@@ -91,6 +91,35 @@ class ServerConfig:
 
 
 @dataclass
+class ModelEndpoint:
+    """Read-only summary of a registered model endpoint for client discovery."""
+
+    name: str
+    active_version: str
+    versions: List[str]
+    state: ModelLifecycleState
+    health_state: HealthState = HealthState.HEALTHY
+    backend: str = "numpy"
+    is_compiled: bool = False
+    is_quantized: bool = False
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert ModelEndpoint summary to dictionary."""
+        return {
+            "name": self.name,
+            "active_version": self.active_version,
+            "versions": self.versions,
+            "state": self.state.value if isinstance(self.state, Enum) else str(self.state),
+            "health_state": self.health_state.value if isinstance(self.health_state, Enum) else str(self.health_state),
+            "backend": self.backend,
+            "is_compiled": self.is_compiled,
+            "is_quantized": self.is_quantized,
+            "metadata": dict(self.metadata),
+        }
+
+
+@dataclass
 class ModelEntry:
     """Registry entry representing a loaded model version."""
 
@@ -132,6 +161,8 @@ class ModelEntry:
         return {
             "name": self.name,
             "version": self.version,
+            "active_version": self.version,
+            "versions": [self.version],
             "path": self.path,
             "state": self.state.value,
             "health_state": self.health_state.value,
@@ -322,6 +353,21 @@ class InferenceServer:
             if self._state == ServerLifecycleState.CREATED:
                 self._state = ServerLifecycleState.RUNNING
         return self
+
+    @classmethod
+    def from_manifest(cls, manifest_source: Union[str, Dict[str, Any], Any]) -> InferenceServer:
+        """Construct and bootstrap an InferenceServer instance from a DeploymentManifest or JSON file/dict."""
+        from tensorforge.inference.manifest import DeploymentManifest
+        if isinstance(manifest_source, DeploymentManifest):
+            return manifest_source.deploy()
+        elif isinstance(manifest_source, str):
+            manifest = DeploymentManifest.load_json(manifest_source)
+            return manifest.deploy()
+        elif isinstance(manifest_source, dict):
+            manifest = DeploymentManifest.from_dict(manifest_source)
+            return manifest.deploy()
+        else:
+            raise TensorForgeInputError(f"Invalid manifest_source type: {type(manifest_source)}")
 
     def load_model(
         self,
@@ -708,7 +754,7 @@ class InferenceServer:
         for m in models_list:
             model_key = f"{m.name}:{m.version}"
             sched_health = m.scheduler.health() if m.scheduler is not None else {}
-            model_health_map[model_key] = {
+            entry_info = {
                 "name": m.name,
                 "version": m.version,
                 "state": m.state.value,
@@ -718,6 +764,9 @@ class InferenceServer:
                 "circuit_breaker": m.circuit_breaker.to_dict(),
                 "scheduler_health": sched_health,
             }
+            model_health_map[model_key] = entry_info
+            if m.is_active:
+                model_health_map[m.name] = entry_info
 
         with self._lock:
             state_val = self._state.value
@@ -734,7 +783,16 @@ class InferenceServer:
 
     def models(self) -> List[Dict[str, Any]]:
         """List metadata summaries for all registered models."""
-        return [entry.to_dict() for entry in self._registry.list_models()]
+        models_list = self._registry.list_models()
+        result = []
+        for entry in models_list:
+            d = entry.to_dict()
+            active_ver = self._registry._active_versions.get(entry.name, entry.version)
+            versions = [v for (n, v) in self._registry._models.keys() if n == entry.name]
+            d["active_version"] = active_ver
+            d["versions"] = versions
+            result.append(d)
+        return result
 
     def stats(self) -> Dict[str, Any]:
         """Aggregate statistical diagnostic report across all loaded models."""
@@ -792,6 +850,7 @@ class InferenceServer:
             "server": {
                 "state": self.state.value,
                 "loaded_models": len(models_list),
+                "stats": self.stats(),
                 "aggregate_metrics": server_snapshot,
             },
             "models": per_model_snapshots,

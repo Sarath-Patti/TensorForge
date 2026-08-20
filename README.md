@@ -4,41 +4,43 @@
 
 ---
 
-## Current Milestone: `v1.9 – Production Hardening & Reliability`
+## Current Milestone: `v2.0 – Production Runtime API & Deployment Foundation`
 
-> **Development Status:** `v1.9 (Production Release)`
-> TensorForge v1.9 hardens the existing inference runtime and serving layer (`InferenceServer`) for production-style failure conditions. It introduces monotonic request deadlines (`timeout_ms`), explicit request cancellation, per-model circuit breakers (`CircuitBreaker`, `CircuitState`), failure containment, model health state classification (`HealthState`: `HEALTHY`, `DEGRADED`, `UNHEALTHY`), controlled probing recovery (`HALF_OPEN`), automatic exponential backoff retries (`RetryConfig`, `compute_backoff_delay_sec`), resource exhaustion protection, atomic model reload failure recovery, graceful server shutdown within monotonic deadlines, and structured reliability metrics (`ReliabilityMetrics`) in `PerformanceSnapshot`.
+> **Development Status:** `v2.0 (Production Release)`
+> TensorForge v2.0 formalizes the production-facing runtime API, deployment manifest bootstrapping system, and pre-packaged workload runtime profiles (`LOW_LATENCY`, `HIGH_THROUGHPUT`, `BALANCED`, `EMBEDDED`). It introduces the high-level `InferenceClient` application interface, standardized `InferenceRequestContract` SLA specifications, declarative `DeploymentManifest` JSON loaders (`InferenceServer.from_manifest()`), context manager support, vector/batch prediction helpers, and production diagnostics.
 
 > [!NOTE]
-> `InferenceServer` is an in-process serving abstraction designed for high-performance Python application integration, embedded inference engines, and framework backends. It is **not** a distributed HTTP/gRPC network daemon, process supervisor, or cloud cluster manager.
+> `InferenceServer` and `InferenceClient` provide an in-process serving abstraction designed for high-performance Python application integration, embedded inference engines, and framework backends. It is **not** a distributed HTTP/gRPC network daemon, process supervisor, or cloud cluster manager.
 
 ---
 
 ## End-to-End System Architecture
 
 ```
-                 Client Request (predict / submit)
-                                 │
-                                 ▼
-                          InferenceServer
-                                 │
-                          ModelRegistry
-                                 │
-             ┌───────────────────┼───────────────────┐
-             ▼                   ▼                   ▼
-      Model A (v1)        Model A (v2)        Model B (v1)
-             │                   │                   │
-      InferenceRuntime   InferenceRuntime   InferenceRuntime
-             │                   │                   │
-    InferenceScheduler  InferenceScheduler  InferenceScheduler
-             │                   │                   │
-    ┌────────┼────────┐ ┌────────┼────────┐ ┌────────┼────────┐
-    │Compile │Batch   │ │Compile │Batch   │ │Compile │Batch   │
-    └────────┴────────┘ └────────┴────────┘ └────────┴────────┘
-             │                   │                   │
-             └───────────────────┼───────────────────┘
-                                 ▼
-                     Observability & Metrics
+                    Application
+                         │
+                         ▼
+                 InferenceClient
+                         │
+                 Request Contract
+                         │
+                         ▼
+                 InferenceServer
+                         │
+            ┌────────────┴────────────┐
+            │                         │
+        Model Routing            Runtime Config
+            │                         │
+            ▼                         ▼
+      Model Version              Runtime Profile
+            │
+            ▼
+       InferenceRuntime
+            │
+       Compiler / Scheduler
+            │
+            ▼
+       Native / NumPy
 ```
 
 ---

@@ -140,13 +140,17 @@ class InferenceRequest:
     def __init__(
         self,
         request_id: str,
-        input_tensor: Tensor,
-        submission_time_ns: int,
+        input_tensor: Optional[Tensor] = None,
+        submission_time_ns: Optional[int] = None,
         timeout_ms: Optional[float] = None,
+        inputs: Optional[Tensor] = None,
     ) -> None:
+        target_tensor = input_tensor if input_tensor is not None else inputs
+        if target_tensor is None:
+            raise TensorForgeInputError("InferenceRequest requires 'input_tensor' or 'inputs'.")
         self.request_id: str = request_id
-        self.input_tensor: Tensor = input_tensor
-        self.submission_time_ns: int = submission_time_ns
+        self.input_tensor: Tensor = target_tensor
+        self.submission_time_ns: int = submission_time_ns if submission_time_ns is not None else time.time_ns()
         self.timeout_ms: Optional[float] = timeout_ms
         self.submission_monotonic: float = time.monotonic()
         self.deadline: Optional[float] = (
@@ -154,7 +158,7 @@ class InferenceRequest:
         )
 
         # Shape characteristics
-        shape = input_tensor.shape
+        shape = target_tensor.shape
         if len(shape) == 1:
             self.batch_size: int = 1
             self.feature_shape: Tuple[int, ...] = (shape[0],)
@@ -266,10 +270,11 @@ class InferenceRequest:
                 self.state = RequestState.FAILED
             self._event.set()
 
-    def wait(self, timeout: Optional[float] = None) -> Tensor:
+    def wait(self, timeout: Optional[float] = None, timeout_sec: Optional[float] = None) -> Tensor:
         """Wait for request execution to complete and return the output tensor."""
+        eff_timeout = timeout if timeout is not None else timeout_sec
         # Calculate effective wait timeout respecting monotonic deadline
-        effective_timeout = timeout
+        effective_timeout = eff_timeout
         rem_sec = self.remaining_time_sec()
         if rem_sec is not None:
             if effective_timeout is None or rem_sec < effective_timeout:
@@ -280,7 +285,7 @@ class InferenceRequest:
             if self.is_expired():
                 self.expire()
                 raise RequestDeadlineExceededError(f"InferenceRequest '{self.request_id}' exceeded deadline after {self.timeout_ms}ms.")
-            raise RequestDeadlineExceededError(f"InferenceRequest '{self.request_id}' timed out after {timeout} seconds.")
+            raise RequestDeadlineExceededError(f"InferenceRequest '{self.request_id}' timed out after {eff_timeout} seconds.")
 
         with self._lock:
             if self._is_cancelled or self.state == RequestState.CANCELLED:
@@ -312,9 +317,10 @@ class InferenceFuture:
         """Current lifecycle state of the request."""
         return self._request.state
 
-    def result(self, timeout: Optional[float] = None) -> Tensor:
+    def result(self, timeout: Optional[float] = None, timeout_sec: Optional[float] = None) -> Tensor:
         """Wait for completion and return the resulting prediction Tensor."""
-        return self._request.wait(timeout=timeout)
+        eff_timeout = timeout if timeout is not None else timeout_sec
+        return self._request.wait(timeout=eff_timeout)
 
     def done(self) -> bool:
         """Return True if the prediction has completed, failed, or was cancelled."""
