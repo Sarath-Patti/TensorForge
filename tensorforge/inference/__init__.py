@@ -7,6 +7,20 @@ from tensorforge.inference.graph import InferenceGraph, InferenceNode
 from tensorforge.inference.limits import RuntimeLimits, RuntimeState
 from tensorforge.inference.loader import ModelLoader
 from tensorforge.inference.memory import BufferLifetime, MemoryPlan, MemoryPlanner, MemoryRegion, PlannedBuffer
+from tensorforge.inference.observability import (
+    BackendMetrics,
+    BatchMetrics,
+    CompilerMetrics,
+    LatencyHistogram,
+    LatencyMetrics,
+    LatencyStats,
+    MemoryMetrics,
+    MetricsCollector,
+    PerformanceSnapshot,
+    RequestMetrics,
+    SchedulerMetrics,
+    ThroughputStats,
+)
 from tensorforge.inference.optimizer import GraphOptimizer
 from tensorforge.inference.plan import ExecutionPlan, ExecutionStep
 from tensorforge.inference.profiler import PerformanceReport, ProfileEvent, ProfileSession, RuntimeProfiler
@@ -52,4 +66,16 @@ __all__ = [
     "SchedulerLifecycleState",
     "InferenceFuture",
     "InferenceRequest",
+    "LatencyHistogram",
+    "LatencyStats",
+    "LatencyMetrics",
+    "RequestMetrics",
+    "BatchMetrics",
+    "ThroughputStats",
+    "BackendMetrics",
+    "CompilerMetrics",
+    "MemoryMetrics",
+    "SchedulerMetrics",
+    "PerformanceSnapshot",
+    "MetricsCollector",
 ]

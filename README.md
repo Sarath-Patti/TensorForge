@@ -4,77 +4,72 @@
 
 ---
 
-## Current Milestone: `v1.6 – Production Inference Scheduling & Dynamic Batching`
+## Current Milestone: `v1.7 – Production Inference Observability & Performance Analytics`
 
-> **Development Status:** `v1.6 (Production Release)`
-> TensorForge v1.6 introduces an in-process request scheduling and dynamic batching subsystem (`InferenceScheduler`). The scheduler sits above `InferenceRuntime`, queueing concurrent client requests with bounded backpressure (`SchedulerQueueFullError`), automatically aggregating compatible sub-batches into larger execution batches up to `max_batch_size` or upon `batch_timeout_ms`, executing them through the underlying compiled/native runtime, and demultiplexing the resulting output tensors back to the originating requests.
+> **Development Status:** `v1.7 (Production Release)`
+> TensorForge v1.7 introduces a unified, low-overhead observability and performance analytics subsystem (`MetricsCollector`, `PerformanceSnapshot`). It provides end-to-end telemetry across both single-request and dynamically batched workloads: request lifecycle counters, queue latency distributions, execution and end-to-end percentiles (min, max, mean, p50, p90, p95, p99) via bounded reservoirs, monotonic throughput tracking (requests/sec, samples/sec, batches/sec), backend execution and fallback analytics, compiler cache hit rates, workspace memory utilization, thread-safe reset mechanics, and structured JSON export.
 
 ---
 
 ## End-to-End System Architecture
 
 ```
-                  Inference Request (predict / submit)
-                                 │
-                                 ▼
-                         Runtime Admission
-                                 │
-                                 ▼
-                          Request Scheduler (InferenceScheduler)
-                                 │
-                          ┌──────┴──────┐
-                          │             │
-                      Queue          Batching (FIFO / LARGEST_BATCH_FIRST)
-                          │             │
-                          └──────┬──────┘
-                                 ▼
-                          Dynamic Batch
-                                 │
-                                 ▼
-                          InferenceRuntime (FP32 / INT8, Compiled / Fused / Native)
-                                 │
-                          Batch Output
-                                 │
-                                 ▼
-                        Result Demultiplexer
-                                 │
-                          ┌──────┼──────┐
-                          ▼      ▼      ▼
-                        Req A  Req B  Req C
+                    Inference Request (predict / submit)
+                                   │
+                                   ▼
+                            v1.6 Scheduler
+                                   │
+                     ┌─────────────┴─────────────┐
+                     │                           │
+                Request Metrics             Batch Metrics
+                     │                           │
+                     └─────────────┬─────────────┘
+                                   ▼
+                          Metrics Collector (MetricsCollector)
+                                   │
+                     ┌─────────────┼─────────────┐
+                     ▼             ▼             ▼
+                  Runtime       Backend       Memory
+                  Metrics       Metrics       Metrics
+                     │             │             │
+                     └─────────────┼─────────────┘
+                                   ▼
+                         PerformanceSnapshot
+                                   │
+                     ┌─────────────┼─────────────┐
+                     ▼             ▼             ▼
+                  Console       JSON Export    Profiler
 ```
 
 ---
 
 ## Key Features & Subsystems
 
-### 1. In-Process Inference Scheduler (`tensorforge/inference/scheduler.py`)
-- **`InferenceScheduler`**: Wraps any `InferenceRuntime` to manage request concurrency and dynamic batching.
-- **`SchedulerConfig`**:
-  - `max_batch_size`: Maximum dynamically aggregated batch dimension.
-  - `max_queue_size`: Bounded queue depth protecting against memory exhaustion.
-  - `batch_timeout_ms`: Maximum time to wait for a full batch before dispatching.
-  - `policy`: Scheduling policy (`FIFO` or `LARGEST_BATCH_FIRST`).
-  - `drain_on_close`: Whether to drain pending requests prior to shutdown.
+### 1. Unified Observability Engine (`tensorforge/inference/observability.py`)
+- **`MetricsCollector`**: Thread-safe central metrics accumulator recording request outcomes, queue times, execution durations, backend dispatches, dynamic batches, compiler cache hits, and workspace memory.
+- **`PerformanceSnapshot`**: Immutable, comprehensive diagnostic snapshot containing structured dataclasses:
+  - `requests`: Submitted, completed, failed, rejected, cancelled, active, and queue depth.
+  - `batches`: Formed, processed samples, average batch size, and capacity utilization.
+  - `latency`: Bounded reservoir percentile distributions (`p50`, `p90`, `p95`, `p99`, `mean`, `min`, `max`) for queue wait, execution, and end-to-end duration.
+  - `throughput`: Monotonic rates for requests/sec, samples/sec, and batches/sec.
+  - `backends`: Invocation breakdown across NumPy, Native, Fused, Compiled, and Fallback reasons.
+  - `compiler`: Cache lookups, hits, misses, hit rate, and plan compilation time.
+  - `memory`: Workspace bytes, peak workspace, planned memory, and parameter sizes.
+  - `scheduler`: Queue capacity, configured max batch, timeout, and lifecycle state.
 
-### 2. Dynamic Batching & Result Demultiplexing
-- **Automatic Batch Assembly**: Combines compatible 1D and 2D tensor requests along the batch dimension into a single contiguous tensor.
-- **Batch Compatibility Rules**: Verifies rank, feature dimensions, and dtype compatibility before joining a batch. Incompatible requests remain queued for compatible batches.
-- **Precise Output Slicing**: Slices and demultiplexes output rows directly back to individual request futures without data leakage across requests.
+### 2. Runtime & Scheduler Integration
+- **`runtime.performance_snapshot()` & `scheduler.performance_snapshot()`**: Generate point-in-time immutable performance analytics snapshots.
+- **`runtime.export_metrics("metrics.json")`**: Save analytics snapshots to structured JSON.
+- **`runtime.reset_metrics()`**: Safely reset counters and latency reservoirs without altering runtime configuration or active models.
 
-### 3. Synchronous & Asynchronous APIs
-- **Synchronous API (`scheduler.predict(x)`)**: Blocks until the dynamically formed batch completes and returns the sliced output tensor.
-- **Asynchronous API (`scheduler.submit(x) -> InferenceFuture`)**: Returns a lightweight future supporting `.result()`, `.done()`, `.exception()`, and pre-execution `.cancel()`.
-
-### 4. Backpressure & Lifecycle Protection
-- **Bounded Queue**: Immediately rejects requests when queue capacity is reached (`SchedulerQueueFullError`).
-- **Graceful Draining & Shutdown**: `scheduler.close(drain=True)` finishes in-flight requests and cleanly joins the background worker thread.
-- **Post-Shutdown Protection**: Rejects submissions with `SchedulerClosedError`.
+### 3. Bounded Memory & Low-Overhead Design
+- **`LatencyHistogram`**: Ring buffer reservoir with $O(1)$ memory bounds (default: 2048 samples) ensuring predictable overhead during continuous, high-throughput inference serving.
 
 ---
 
 ## Usage Examples
 
-### 1. Initializing Dynamic Batching Scheduler
+### 1. Generating Performance Analytics Snapshots
 
 ```python
 import tensorforge as tf
@@ -82,32 +77,28 @@ from tensorforge.inference import (
     InferenceRuntime,
     InferenceScheduler,
     SchedulerConfig,
-    SchedulingPolicy,
 )
 
-# 1. Load compiled runtime
-runtime = InferenceRuntime.load("model.tfmodel")
+# 1. Load model and start scheduler
+runtime = InferenceRuntime.load("classifier.tfmodel").compile(input_shape=(16, 64))
+scheduler = InferenceScheduler(runtime, config=SchedulerConfig(max_batch_size=16, batch_timeout_ms=2.0))
 
-# 2. Configure dynamic batching
-config = SchedulerConfig(
-    max_batch_size=32,
-    max_queue_size=128,
-    batch_timeout_ms=2.0,
-    policy=SchedulingPolicy.FIFO,
-)
+# 2. Run predictions
+for _ in range(20):
+    _ = scheduler.predict(tf.randn((2, 64)))
 
-# 3. Initialize scheduler
-scheduler = InferenceScheduler(runtime, config=config)
+# 3. Obtain performance snapshot
+snapshot = scheduler.performance_snapshot()
 
-# 4. Synchronous prediction
-x = tf.randn((2, 64))
-out = scheduler.predict(x)
+# Print formatted human-readable summary
+print(snapshot.summary())
 
-# 5. Asynchronous submission
-future = scheduler.submit(x)
-out = future.result(timeout=1.0)
+# 4. Export to JSON
+scheduler.export_metrics("inference_metrics.json", indent=2)
 
-# 6. Shutdown
+# 5. Reset metrics
+scheduler.reset_metrics()
+
 scheduler.close()
 runtime.close()
 ```
@@ -120,10 +111,11 @@ runtime.close()
 TensorForge/
 ├── native/                          # Native C++17 Runtime Subsystem
 ├── tensorforge/
-│   ├── __init__.py                  # Top-level exports & version (1.6.0)
-│   ├── inference/                   # Production Inference, Compiler, Safety & Scheduler
+│   ├── __init__.py                  # Top-level exports & version (1.7.0)
+│   ├── inference/                   # Production Inference, Compiler, Safety, Scheduler & Observability
 │   │   ├── __init__.py              # Public inference exports
-│   │   ├── scheduler.py             # NEW: InferenceScheduler, SchedulerConfig, InferenceFuture
+│   │   ├── observability.py         # NEW: MetricsCollector, PerformanceSnapshot, LatencyHistogram
+│   │   ├── scheduler.py             # InferenceScheduler, SchedulerConfig, InferenceFuture
 │   │   ├── limits.py                # RuntimeLimits & RuntimeState
 │   │   ├── context.py               # ExecutionContext (with request_id) & ExecutionContextPool
 │   │   ├── profiler.py              # ProfileEvent, ProfileSession, RuntimeProfiler, PerformanceReport
@@ -146,30 +138,36 @@ TensorForge/
 │   └── utils/                       # Validation & Exception hierarchy
 │
 ├── tests/                           # Python Test Suite
-│   ├── inference/                   # Inference, Safety, Reliability & Scheduling tests
-│   │   ├── test_scheduler.py        # NEW: Basic scheduler construction & predict
-│   │   ├── test_dynamic_batching.py # NEW: Dynamic batch assembly & demultiplexing
-│   │   ├── test_scheduler_queue.py  # NEW: Bounded queue & backpressure rejection
-│   │   ├── test_scheduler_shutdown.py # NEW: Draining lifecycle & close
-│   │   ├── test_scheduler_failure_recovery.py # NEW: Fault tolerance across batches
-│   │   ├── test_scheduler_concurrency.py # NEW: Multi-producer concurrent submissions
-│   │   ├── test_scheduler_statistics.py # NEW: Health & stats telemetry
-│   │   └── test_scheduler_backend.py # NEW: Compiled & quantized runtime integration
-│   ├── serialization/
-│   ├── quantization/
-│   ├── backend/
-│   ├── autograd/
-│   ├── nn/
-│   └── optim/
+│   ├── inference/                   # Inference, Safety, Reliability, Scheduling & Observability tests
+│   │   ├── test_observability.py    # NEW: MetricsCollector lifecycle & snapshot structure
+│   │   ├── test_latency_metrics.py  # NEW: LatencyHistogram percentiles & bounding
+│   │   ├── test_throughput_metrics.py # NEW: Throughput rate calculations
+│   │   ├── test_backend_metrics.py  # NEW: Backend execution & fallback tracking
+│   │   ├── test_scheduler_observability.py # NEW: Scheduler performance snapshot
+│   │   ├── test_runtime_observability.py # NEW: Runtime performance snapshot
+│   │   ├── test_metrics_reset.py    # NEW: Metrics reset mechanics
+│   │   ├── test_metrics_export.py   # NEW: JSON export & deserialization
+│   │   ├── test_observability_concurrency.py # NEW: Thread-safe metric collection
+│   │   ├── test_scheduler.py
+│   │   ├── test_dynamic_batching.py
+│   │   ├── test_scheduler_queue.py
+│   │   ├── test_scheduler_shutdown.py
+│   │   ├── test_scheduler_failure_recovery.py
+│   │   ├── test_scheduler_concurrency.py
+│   │   ├── test_scheduler_statistics.py
+│   │   ├── test_scheduler_backend.py
+│   │   └── ...
 │
 ├── examples/                        # Demonstrations
-│   ├── dynamic_batching_demo.py     # NEW: Dynamic batching and scheduler demo
+│   ├── observability_demo.py        # NEW: Unified performance analytics demo
+│   ├── dynamic_batching_demo.py
 │   ├── production_runtime_demo.py
 │   ├── profiling_demo.py
 │   └── concurrent_inference_demo.py
 │
 ├── benchmarks/                      # Performance Benchmarks
-│   ├── dynamic_batching_benchmark.py # NEW: Dynamic batching vs direct benchmark
+│   ├── observability_overhead.py    # NEW: Metrics collection overhead benchmark
+│   ├── dynamic_batching_benchmark.py
 │   ├── runtime_safety_overhead.py
 │   └── profiling_overhead.py
 │
@@ -200,3 +198,4 @@ TensorForge/
 | **v1.4 – Runtime Observability & Performance Diagnostics** | **Complete** | Profiler subsystem, ProfileEvent, ProfileSession, PerformanceReport, latency percentiles, low overhead |
 | **v1.5 – Production Reliability, Resource Management & Runtime Safety** | **Complete** | RuntimeLimits, admission control, input validation, request IDs, failure recovery, graceful shutdown |
 | **v1.6 – Production Inference Scheduling & Dynamic Batching** | **Complete** | InferenceScheduler, SchedulerConfig, dynamic batching, result demultiplexing, queue backpressure |
+| **v1.7 – Production Inference Observability & Performance Analytics** | **Complete** | MetricsCollector, PerformanceSnapshot, bounded latency histograms, throughput, backend analytics |

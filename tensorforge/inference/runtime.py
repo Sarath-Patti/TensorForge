@@ -22,6 +22,7 @@ from tensorforge.inference.graph import InferenceGraph
 from tensorforge.inference.limits import RuntimeLimits, RuntimeState
 from tensorforge.inference.loader import ModelLoader
 from tensorforge.inference.memory import MemoryPlan, MemoryPlanner
+from tensorforge.inference.observability import MetricsCollector, PerformanceSnapshot
 from tensorforge.inference.optimizer import GraphOptimizer
 from tensorforge.inference.plan import ExecutionPlan
 from tensorforge.inference.profiler import ProfileEvent, ProfileSession, RuntimeProfiler
@@ -116,6 +117,7 @@ class InferenceRuntime:
 
         # Profiler and telemetry state
         self._profiler: RuntimeProfiler = RuntimeProfiler()
+        self._metrics: MetricsCollector = MetricsCollector()
 
         # Thread-safe execution context pool & concurrency locks
         self._context_pool: ExecutionContextPool = ExecutionContextPool()
@@ -530,6 +532,70 @@ class InferenceRuntime:
         """Return latency distribution percentiles and throughput."""
         return self._profiler.latency_stats()
 
+    def performance_snapshot(self) -> PerformanceSnapshot:
+        """Generate an immutable, comprehensive PerformanceSnapshot for the runtime.
+
+        Returns:
+            PerformanceSnapshot containing requests, batches, latency, throughput,
+            backend, compiler, and memory analytics.
+
+        Raises:
+            RuntimeClosedError: If invoked on a closed InferenceRuntime.
+        """
+        with self._lifecycle_lock:
+            if self._is_closed:
+                raise RuntimeClosedError("Cannot generate performance snapshot: InferenceRuntime has been closed.")
+
+        # Sync compiler cache analytics
+        if self._is_compiled and self._compiled_plan is not None:
+            c_stats = InferenceCompiler.cache_stats()
+            self._metrics._cache_hits = c_stats.get("hits", 0)
+            self._metrics._cache_misses = c_stats.get("misses", 0)
+            self._metrics._compile_requests = c_stats.get("total_lookups", 0)
+
+        # Sync memory analytics
+        param_bytes = 0
+        try:
+            from tensorforge.serialization.checkpoint import compute_model_size
+            param_bytes = compute_model_size(self._model).get("parameter_bytes", 0)
+        except Exception:
+            pass
+
+        self._metrics.record_memory(
+            workspace_bytes=self.workspace_size,
+            planned_bytes=self.workspace_size,
+            param_bytes=param_bytes,
+            model_size_bytes=param_bytes,
+        )
+        return self._metrics.snapshot()
+
+    def metrics(self) -> PerformanceSnapshot:
+        """Alias for performance_snapshot()."""
+        return self.performance_snapshot()
+
+    def export_metrics(self, filepath: str, indent: int = 2) -> None:
+        """Export current performance analytics snapshot to a JSON file.
+
+        Args:
+            filepath: Destination file path.
+            indent: JSON indentation spaces (default: 2).
+        """
+        self.performance_snapshot().save_json(filepath, indent=indent)
+
+    def reset_metrics(self) -> InferenceRuntime:
+        """Reset all metrics collector counters, latency distributions, and timers.
+
+        Returns:
+            Self (enables method chaining).
+        """
+        self._metrics.reset()
+        return self
+
+    @property
+    def metrics_collector(self) -> MetricsCollector:
+        """Access the underlying MetricsCollector instance."""
+        return self._metrics
+
     @property
     def is_optimized(self) -> bool:
         """Whether operator fusion optimizations are active."""
@@ -715,6 +781,7 @@ class InferenceRuntime:
             req_id = f"req-{self._request_counter}"
             self._peak_active_requests = max(self._peak_active_requests, self._active_requests)
 
+        self._metrics.record_request_submitted(queue_depth=0)
         target_backend = self.backend
         is_prof = self._profiler.is_enabled
         t0 = time.perf_counter_ns()
@@ -892,6 +959,18 @@ class InferenceRuntime:
             if is_prof:
                 self._profiler.record_prediction(t1 - t0, batch_size=batch_size)
 
+            self._metrics.record_request_completed(
+                queue_wait_ms=0.0,
+                exec_ms=duration_ms,
+                e2e_ms=duration_ms,
+                samples=batch_size,
+            )
+            self._metrics.record_backend(
+                backend=target_backend,
+                is_fused=self._is_optimized or self._is_compiled,
+                is_compiled=self._is_compiled,
+            )
+
             with self._stats_lock:
                 self._prediction_count += 1
                 self._completed_requests += 1
@@ -899,8 +978,12 @@ class InferenceRuntime:
             return output.detach()
 
         except (RuntimeLimitError, RuntimeBusyError, TensorForgeInputError, RuntimeTimeoutError):
+            self._metrics.record_request_rejected()
             raise
         except Exception as e:
+            t_err = time.perf_counter_ns()
+            err_dur = (t_err - t0) / 1_000_000.0
+            self._metrics.record_request_failed(exec_ms=err_dur)
             with self._stats_lock:
                 self._failed_requests += 1
                 self._error_count += 1

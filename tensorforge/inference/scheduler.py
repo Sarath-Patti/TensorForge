@@ -10,6 +10,11 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 import numpy as np
 
 from tensorforge.inference.limits import RuntimeLimits
+from tensorforge.inference.observability import (
+    MetricsCollector,
+    PerformanceSnapshot,
+    SchedulerMetrics,
+)
 from tensorforge.inference.runtime import InferenceRuntime
 from tensorforge.tensor.dtype import float32
 from tensorforge.tensor.tensor import Tensor
@@ -320,6 +325,7 @@ class InferenceScheduler:
 
         # Telemetry and counters
         self._stats_lock: threading.RLock = threading.RLock()
+        self._metrics: MetricsCollector = MetricsCollector()
         self._request_counter: int = 0
         self._submitted_requests: int = 0
         self._completed_requests: int = 0
@@ -445,6 +451,7 @@ class InferenceScheduler:
             if len(self._queue) >= self._config.max_queue_size:
                 with self._stats_lock:
                     self._rejected_requests += 1
+                self._metrics.record_request_rejected("queue_full")
                 raise SchedulerQueueFullError(
                     f"Scheduler queue is full ({len(self._queue)}/{self._config.max_queue_size} pending requests)."
                 )
@@ -462,6 +469,7 @@ class InferenceScheduler:
             self._queue.append(req)
 
             q_len = len(self._queue)
+            self._metrics.record_request_submitted(queue_depth=q_len)
             with self._stats_lock:
                 self._peak_queue_depth = max(self._peak_queue_depth, q_len)
 
@@ -631,6 +639,12 @@ class InferenceScheduler:
             with self._stats_lock:
                 self._total_queue_wait_ns += wait_ns
 
+        # Record batch formation
+        self._metrics.record_batch(
+            batch_size=total_batch_samples,
+            configured_max_batch=self._config.max_batch_size,
+        )
+
         try:
             # 1. Assemble combined batch tensor
             if len(batch_requests) == 1:
@@ -647,6 +661,8 @@ class InferenceScheduler:
             t_exec_1 = time.perf_counter_ns()
 
             exec_duration_ns = t_exec_1 - t_exec_0
+            exec_ms = exec_duration_ns / 1_000_000.0
+
             with self._stats_lock:
                 self._total_execution_ns += exec_duration_ns
 
@@ -666,6 +682,21 @@ class InferenceScheduler:
 
                 req.set_result(req_out)
 
+                q_wait_ms = (t_exec_0 - req.submission_time_ns) / 1_000_000.0
+                e2e_ms = (t_exec_1 - req.submission_time_ns) / 1_000_000.0
+                self._metrics.record_request_completed(
+                    queue_wait_ms=q_wait_ms,
+                    exec_ms=exec_ms,
+                    e2e_ms=e2e_ms,
+                    samples=req.batch_size,
+                )
+
+            self._metrics.record_backend(
+                backend=self._runtime.backend,
+                is_fused=self._runtime.is_optimized or self._runtime.is_compiled,
+                is_compiled=self._runtime.is_compiled,
+            )
+
             with self._stats_lock:
                 self._batches_formed += 1
                 self._completed_requests += len(batch_requests)
@@ -673,9 +704,12 @@ class InferenceScheduler:
                 self._max_batch_size_observed = max(self._max_batch_size_observed, total_batch_samples)
 
         except Exception as e:
+            t_err = time.perf_counter_ns()
+            err_ms = (t_err - now_ns) / 1_000_000.0
             # Broadcast exception to all requests in the batch
             for req in batch_requests:
                 req.set_exception(e)
+                self._metrics.record_request_failed(exec_ms=err_ms)
             with self._stats_lock:
                 self._failed_requests += len(batch_requests)
 
@@ -740,8 +774,79 @@ class InferenceScheduler:
                 "avg_queue_wait_ms": avg_wait_ms,
                 "avg_batch_execution_ms": avg_exec_ms,
                 "runtime_stats": self._runtime.stats(),
-                "tensorforge_version": "1.6.0",
+                "tensorforge_version": "1.7.0",
             }
+
+    def performance_snapshot(self) -> PerformanceSnapshot:
+        """Generate an immutable, comprehensive PerformanceSnapshot for the scheduler.
+
+        Returns:
+            PerformanceSnapshot containing requests, batches, latency, throughput,
+            backend, compiler, memory, and scheduler analytics.
+        """
+        # Sync scheduler configuration and queue state
+        self._metrics.set_scheduler_metrics(
+            SchedulerMetrics(
+                queue_depth=self.queue_depth,
+                max_queue_size=self._config.max_queue_size,
+                max_batch_size=self._config.max_batch_size,
+                batch_timeout_ms=self._config.batch_timeout_ms,
+                policy=self._config.policy.value,
+                lifecycle_state=self.lifecycle_state,
+            )
+        )
+
+        # Sync runtime memory metrics
+        param_bytes = 0
+        try:
+            from tensorforge.serialization.checkpoint import compute_model_size
+            param_bytes = compute_model_size(self._runtime.model).get("parameter_bytes", 0)
+        except Exception:
+            pass
+
+        self._metrics.record_memory(
+            workspace_bytes=self._runtime.workspace_size,
+            planned_bytes=self._runtime.workspace_size,
+            param_bytes=param_bytes,
+            model_size_bytes=param_bytes,
+        )
+
+        # Sync compiler analytics if active
+        if self._runtime.is_compiled:
+            from tensorforge.inference.compiler import InferenceCompiler
+            c_stats = InferenceCompiler.cache_stats()
+            self._metrics._cache_hits = c_stats.get("hits", 0)
+            self._metrics._cache_misses = c_stats.get("misses", 0)
+            self._metrics._compile_requests = c_stats.get("total_lookups", 0)
+
+        return self._metrics.snapshot()
+
+    def metrics(self) -> PerformanceSnapshot:
+        """Alias for performance_snapshot()."""
+        return self.performance_snapshot()
+
+    def export_metrics(self, filepath: str, indent: int = 2) -> None:
+        """Export current scheduler performance snapshot to a JSON file.
+
+        Args:
+            filepath: Destination file path.
+            indent: JSON indentation spaces (default: 2).
+        """
+        self.performance_snapshot().save_json(filepath, indent=indent)
+
+    def reset_metrics(self) -> InferenceScheduler:
+        """Reset all metrics collector counters, latency reservoirs, and timers.
+
+        Returns:
+            Self (enables method chaining).
+        """
+        self._metrics.reset()
+        return self
+
+    @property
+    def metrics_collector(self) -> MetricsCollector:
+        """Access the underlying MetricsCollector instance."""
+        return self._metrics
 
     def __repr__(self) -> str:
         return (

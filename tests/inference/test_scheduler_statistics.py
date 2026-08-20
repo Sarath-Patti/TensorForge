@@ -34,7 +34,7 @@ class TestSchedulerStatistics(unittest.TestCase):
                 self.assertEqual(stats["submitted_requests"], 4)
                 self.assertEqual(stats["completed_requests"], 4)
                 self.assertEqual(stats["failed_requests"], 0)
-                self.assertEqual(stats["tensorforge_version"], "1.6.0")
+                self.assertEqual(stats["tensorforge_version"], "1.7.0")
                 self.assertIn("config", stats)
                 self.assertIn("health", stats)
 

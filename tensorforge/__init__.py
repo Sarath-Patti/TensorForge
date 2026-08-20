@@ -22,12 +22,15 @@ from tensorforge.inference import (
     InferenceNode,
     InferenceRuntime,
     InferenceScheduler,
+    LatencyStats,
     MemoryPlan,
     MemoryPlanner,
     MemoryRegion,
+    MetricsCollector,
     ModelLoader,
     OperatorFusionPass,
     PerformanceReport,
+    PerformanceSnapshot,
     PlannedBuffer,
     ProfileEvent,
     ProfileSession,
@@ -37,6 +40,7 @@ from tensorforge.inference import (
     SchedulerConfig,
     SchedulingPolicy,
     ShapePropagator,
+    ThroughputStats,
 )
 from tensorforge.quantization import (
     QuantizedTensor,
@@ -127,7 +131,7 @@ from tensorforge.utils.validation import (
     TensorForgeInputError,
 )
 
-__version__ = "1.6.0"
+__version__ = "1.7.0"
 
 __all__ = [
     "__version__",
@@ -150,7 +154,7 @@ __all__ = [
     "randn",
     "arange",
     "from_numpy",
-    # Inference Compiler, Memory Planning, Concurrency & Profiling
+    # Inference Compiler, Memory Planning, Concurrency, Scheduler & Observability
     "InferenceRuntime",
     "ModelLoader",
     "InferenceGraph",
@@ -179,6 +183,10 @@ __all__ = [
     "SchedulerConfig",
     "SchedulingPolicy",
     "InferenceFuture",
+    "MetricsCollector",
+    "PerformanceSnapshot",
+    "LatencyStats",
+    "ThroughputStats",
     # Serialization
     "save_model",
     "load_model",

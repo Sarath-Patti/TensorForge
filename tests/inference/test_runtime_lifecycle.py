@@ -96,7 +96,7 @@ class TestRuntimeLifecycle(unittest.TestCase):
             stats = runtime.stats()
             self.assertIn("health", stats)
             self.assertEqual(stats["prediction_count"], 1)
-            self.assertEqual(stats["tensorforge_version"], "1.6.0")
+            self.assertEqual(stats["tensorforge_version"], "1.7.0")
 
             runtime.close()
             health_closed = runtime.health()
