@@ -24,6 +24,16 @@ from tensorforge.inference.observability import (
 from tensorforge.inference.optimizer import GraphOptimizer
 from tensorforge.inference.plan import ExecutionPlan, ExecutionStep
 from tensorforge.inference.profiler import PerformanceReport, ProfileEvent, ProfileSession, RuntimeProfiler
+from tensorforge.inference.reliability import (
+    CircuitBreaker,
+    CircuitBreakerConfig,
+    CircuitState,
+    HealthState,
+    ReliabilityMetrics,
+    RequestState,
+    RetryConfig,
+    compute_backoff_delay_sec,
+)
 from tensorforge.inference.runtime import InferenceRuntime
 from tensorforge.inference.scheduler import (
     InferenceFuture,
@@ -42,6 +52,31 @@ from tensorforge.inference.server import (
     ServerLifecycleState,
 )
 from tensorforge.inference.shapes import ShapePropagator
+from tensorforge.utils.validation import (
+    CircuitBreakerOpenError,
+    ModelAlreadyLoadedError,
+    ModelDegradedError,
+    ModelLoadError,
+    ModelNotFoundError,
+    ModelNotReadyError,
+    ModelVersionNotFoundError,
+    RequestCancelledError,
+    RequestDeadlineExceededError,
+    RetryLimitExceededError,
+    RuntimeBusyError,
+    RuntimeClosedError,
+    RuntimeLimitError,
+    RuntimeResourceError,
+    RuntimeStateError,
+    RuntimeTimeoutError,
+    SchedulerClosedError,
+    SchedulerError,
+    SchedulerQueueFullError,
+    ServerClosedError,
+    ServerError,
+    ServerLimitError,
+    TensorForgeInputError,
+)
 
 __all__ = [
     "InferenceRuntime",
@@ -92,4 +127,35 @@ __all__ = [
     "ModelLifecycleState",
     "ServerLifecycleState",
     "ModelEntry",
+    "HealthState",
+    "CircuitState",
+    "RequestState",
+    "CircuitBreaker",
+    "CircuitBreakerConfig",
+    "RetryConfig",
+    "compute_backoff_delay_sec",
+    "ReliabilityMetrics",
+    "RequestDeadlineExceededError",
+    "RequestCancelledError",
+    "CircuitBreakerOpenError",
+    "ModelDegradedError",
+    "RetryLimitExceededError",
+    "ServerClosedError",
+    "ServerError",
+    "ServerLimitError",
+    "ModelNotFoundError",
+    "ModelVersionNotFoundError",
+    "ModelAlreadyLoadedError",
+    "ModelNotReadyError",
+    "ModelLoadError",
+    "SchedulerError",
+    "SchedulerQueueFullError",
+    "SchedulerClosedError",
+    "RuntimeStateError",
+    "RuntimeClosedError",
+    "RuntimeLimitError",
+    "RuntimeBusyError",
+    "RuntimeResourceError",
+    "RuntimeTimeoutError",
+    "TensorForgeInputError",
 ]

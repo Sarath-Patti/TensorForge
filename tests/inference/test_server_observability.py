@@ -26,7 +26,7 @@ class TestServerObservability(unittest.TestCase):
                 self.assertIn("server", snapshot)
                 self.assertIn("models", snapshot)
                 self.assertIn("m1:1", snapshot["models"])
-                self.assertEqual(snapshot["tensorforge_version"], "1.8.0")
+                self.assertEqual(snapshot["tensorforge_version"], tf.__version__)
 
                 server.export_metrics(json_export_path)
                 self.assertTrue(os.path.exists(json_export_path))
@@ -34,7 +34,7 @@ class TestServerObservability(unittest.TestCase):
                 with open(json_export_path, "r", encoding="utf-8") as f:
                     loaded_json = json.load(f)
 
-                self.assertEqual(loaded_json["tensorforge_version"], "1.8.0")
+                self.assertEqual(loaded_json["tensorforge_version"], tf.__version__)
 
 
 if __name__ == "__main__":

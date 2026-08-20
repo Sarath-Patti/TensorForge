@@ -121,6 +121,26 @@ class ServerLimitError(ServerError, RuntimeLimitError):
     """Raised when a request or model exceeds server-level resource limits."""
 
 
+class RequestDeadlineExceededError(RuntimeTimeoutError):
+    """Raised when a request exceeds its monotonic deadline before or during execution."""
+
+
+class RequestCancelledError(TensorForgeError, RuntimeError):
+    """Raised when an inference request is cancelled prior to batch execution."""
+
+
+class CircuitBreakerOpenError(ServerError, RuntimeBusyError):
+    """Raised when a request is rejected because the model version circuit breaker is OPEN."""
+
+
+class ModelDegradedError(ServerError, RuntimeError):
+    """Raised when a model operates in a degraded health state."""
+
+
+class RetryLimitExceededError(ServerError, RuntimeError):
+    """Raised when an inference request fails after exhausting configured retry attempts."""
+
+
 def validate_shape(shape: Any) -> Tuple[int, ...]:
     """Validate and normalize a shape specification.
 

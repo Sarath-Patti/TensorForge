@@ -4,13 +4,13 @@
 
 ---
 
-## Current Milestone: `v1.8 – Production Inference Serving Layer`
+## Current Milestone: `v1.9 – Production Hardening & Reliability`
 
-> **Development Status:** `v1.8 (Production Release)`
-> TensorForge v1.8 introduces a clean, in-process multi-model inference serving abstraction (`InferenceServer`). It manages multiple named models, supports model versioning (`model="classifier", version="2"`), active version resolution, atomic model reloading (`reload_model`), model unloading (`unload_model`), per-model scheduler queue isolation, server-level and per-model resource limits, operational health checks (`server.health()`), metadata discovery (`server.models()`), aggregate diagnostics (`server.stats()`), and unified multi-model performance snapshots (`server.performance_snapshot()`).
+> **Development Status:** `v1.9 (Production Release)`
+> TensorForge v1.9 hardens the existing inference runtime and serving layer (`InferenceServer`) for production-style failure conditions. It introduces monotonic request deadlines (`timeout_ms`), explicit request cancellation, per-model circuit breakers (`CircuitBreaker`, `CircuitState`), failure containment, model health state classification (`HealthState`: `HEALTHY`, `DEGRADED`, `UNHEALTHY`), controlled probing recovery (`HALF_OPEN`), automatic exponential backoff retries (`RetryConfig`, `compute_backoff_delay_sec`), resource exhaustion protection, atomic model reload failure recovery, graceful server shutdown within monotonic deadlines, and structured reliability metrics (`ReliabilityMetrics`) in `PerformanceSnapshot`.
 
 > [!NOTE]
-> `InferenceServer` is an in-process serving abstraction designed for high-performance Python application integration, embedded inference engines, and framework backends. It is **not** an HTTP/REST or gRPC network daemon.
+> `InferenceServer` is an in-process serving abstraction designed for high-performance Python application integration, embedded inference engines, and framework backends. It is **not** a distributed HTTP/gRPC network daemon, process supervisor, or cloud cluster manager.
 
 ---
 

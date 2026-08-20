@@ -1,6 +1,7 @@
 """Tests for MetricsCollector tracking and PerformanceSnapshot data integrity."""
 
 import unittest
+import tensorforge as tf
 from tensorforge.inference.observability import (
     BatchMetrics,
     LatencyHistogram,
@@ -57,11 +58,11 @@ class TestObservability(unittest.TestCase):
         self.assertIn("backends", d)
         self.assertIn("compiler", d)
         self.assertIn("memory", d)
-        self.assertEqual(d["tensorforge_version"], "1.8.0")
+        self.assertEqual(d["tensorforge_version"], tf.__version__)
 
         json_str = snapshot.to_json()
         self.assertIsInstance(json_str, str)
-        self.assertIn('"tensorforge_version": "1.8.0"', json_str)
+        self.assertIn(f'"tensorforge_version": "{tf.__version__}"', json_str)
 
 
 if __name__ == "__main__":

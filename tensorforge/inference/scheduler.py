@@ -15,11 +15,14 @@ from tensorforge.inference.observability import (
     PerformanceSnapshot,
     SchedulerMetrics,
 )
+from tensorforge.inference.reliability import RequestState
 from tensorforge.inference.runtime import InferenceRuntime
 from tensorforge.serialization.format import LIBRARY_VERSION
 from tensorforge.tensor.dtype import float32
 from tensorforge.tensor.tensor import Tensor
 from tensorforge.utils.validation import (
+    RequestCancelledError,
+    RequestDeadlineExceededError,
     SchedulerClosedError,
     SchedulerError,
     SchedulerQueueFullError,
@@ -139,10 +142,16 @@ class InferenceRequest:
         request_id: str,
         input_tensor: Tensor,
         submission_time_ns: int,
+        timeout_ms: Optional[float] = None,
     ) -> None:
         self.request_id: str = request_id
         self.input_tensor: Tensor = input_tensor
         self.submission_time_ns: int = submission_time_ns
+        self.timeout_ms: Optional[float] = timeout_ms
+        self.submission_monotonic: float = time.monotonic()
+        self.deadline: Optional[float] = (
+            self.submission_monotonic + (timeout_ms / 1000.0) if timeout_ms is not None else None
+        )
 
         # Shape characteristics
         shape = input_tensor.shape
@@ -165,11 +174,12 @@ class InferenceRequest:
         self._is_cancelled: bool = False
         self._is_completed: bool = False
         self._is_batched: bool = False
+        self.state: RequestState = RequestState.CREATED
 
     @property
     def is_cancelled(self) -> bool:
         with self._lock:
-            return self._is_cancelled
+            return self._is_cancelled or self.state == RequestState.CANCELLED
 
     @property
     def is_completed(self) -> bool:
@@ -181,21 +191,53 @@ class InferenceRequest:
         with self._lock:
             return self._is_batched
 
+    def is_expired(self) -> bool:
+        """Check if request has passed its monotonic deadline."""
+        with self._lock:
+            if self._is_completed or self._is_batched:
+                return False
+            if self.deadline is not None and time.monotonic() >= self.deadline:
+                return True
+            return False
+
+    def remaining_time_sec(self) -> Optional[float]:
+        """Return remaining seconds before monotonic deadline, or None if unbounded."""
+        with self._lock:
+            if self.deadline is None:
+                return None
+            return max(0.0, self.deadline - time.monotonic())
+
     def mark_batched(self) -> bool:
-        """Mark request as currently being processed in a batch (prevents late cancellation)."""
+        """Mark request as currently being processed in a batch (prevents late cancellation/expiration)."""
         with self._lock:
             if self._is_cancelled or self._is_completed:
                 return False
+            if self.deadline is not None and time.monotonic() >= self.deadline:
+                return False
             self._is_batched = True
+            self.state = RequestState.RUNNING
             return True
 
     def cancel(self) -> bool:
-        """Cancel request if still pending in the queue and not yet batched."""
+        """Cancel request if still pending in the queue and not yet batched (idempotent)."""
         with self._lock:
             if self._is_batched or self._is_completed:
                 return False
             self._is_cancelled = True
             self._is_completed = True
+            self.state = RequestState.CANCELLED
+            self._exception = RequestCancelledError(f"InferenceRequest '{self.request_id}' was cancelled before execution.")
+            self._event.set()
+            return True
+
+    def expire(self) -> bool:
+        """Mark request as expired due to deadline exceedance before execution (idempotent)."""
+        with self._lock:
+            if self._is_batched or self._is_completed:
+                return False
+            self._is_completed = True
+            self.state = RequestState.TIMED_OUT
+            self._exception = RequestDeadlineExceededError(f"InferenceRequest '{self.request_id}' exceeded deadline before execution.")
             self._event.set()
             return True
 
@@ -206,6 +248,7 @@ class InferenceRequest:
                 return
             self._result = result
             self._is_completed = True
+            self.state = RequestState.COMPLETED
             self._event.set()
 
     def set_exception(self, exc: Exception) -> None:
@@ -215,29 +258,37 @@ class InferenceRequest:
                 return
             self._exception = exc
             self._is_completed = True
+            if isinstance(exc, RequestCancelledError):
+                self.state = RequestState.CANCELLED
+            elif isinstance(exc, RequestDeadlineExceededError):
+                self.state = RequestState.TIMED_OUT
+            else:
+                self.state = RequestState.FAILED
             self._event.set()
 
     def wait(self, timeout: Optional[float] = None) -> Tensor:
-        """Wait for request execution to complete and return the output tensor.
+        """Wait for request execution to complete and return the output tensor."""
+        # Calculate effective wait timeout respecting monotonic deadline
+        effective_timeout = timeout
+        rem_sec = self.remaining_time_sec()
+        if rem_sec is not None:
+            if effective_timeout is None or rem_sec < effective_timeout:
+                effective_timeout = rem_sec
 
-        Args:
-            timeout: Maximum time in seconds to wait.
-
-        Returns:
-            Output Tensor representing prediction results.
-
-        Raises:
-            TimeoutError: If execution exceeds wait timeout.
-            SchedulerError: If request was cancelled.
-            Exception: Re-raises any exception encountered during runtime execution.
-        """
-        finished = self._event.wait(timeout=timeout)
+        finished = self._event.wait(timeout=effective_timeout)
         if not finished:
-            raise TimeoutError(f"InferenceRequest '{self.request_id}' timed out after {timeout} seconds.")
+            if self.is_expired():
+                self.expire()
+                raise RequestDeadlineExceededError(f"InferenceRequest '{self.request_id}' exceeded deadline after {self.timeout_ms}ms.")
+            raise RequestDeadlineExceededError(f"InferenceRequest '{self.request_id}' timed out after {timeout} seconds.")
 
         with self._lock:
-            if self._is_cancelled:
-                raise SchedulerError(f"InferenceRequest '{self.request_id}' was cancelled before execution.")
+            if self._is_cancelled or self.state == RequestState.CANCELLED:
+                if isinstance(self._exception, RequestCancelledError):
+                    raise self._exception
+                raise RequestCancelledError(f"InferenceRequest '{self.request_id}' was cancelled before execution.")
+            if self.state == RequestState.TIMED_OUT and isinstance(self._exception, RequestDeadlineExceededError):
+                raise self._exception
             if self._exception is not None:
                 raise self._exception
             if self._result is not None:
@@ -256,6 +307,11 @@ class InferenceFuture:
         """Unique identifier of the underlying request."""
         return self._request.request_id
 
+    @property
+    def state(self) -> RequestState:
+        """Current lifecycle state of the request."""
+        return self._request.state
+
     def result(self, timeout: Optional[float] = None) -> Tensor:
         """Wait for completion and return the resulting prediction Tensor."""
         return self._request.wait(timeout=timeout)
@@ -263,6 +319,14 @@ class InferenceFuture:
     def done(self) -> bool:
         """Return True if the prediction has completed, failed, or was cancelled."""
         return self._request.is_completed
+
+    def is_cancelled(self) -> bool:
+        """Return True if request was cancelled before batch execution."""
+        return self._request.is_cancelled
+
+    def is_expired(self) -> bool:
+        """Return True if request passed its deadline before execution."""
+        return self._request.is_expired()
 
     def exception(self, timeout: Optional[float] = None) -> Optional[Exception]:
         """Return the exception encountered during execution, or None if successful."""
@@ -393,11 +457,13 @@ class InferenceScheduler:
     def submit(
         self,
         input_data: Union[Tensor, np.ndarray, Sequence[Any]],
+        timeout_ms: Optional[float] = None,
     ) -> InferenceFuture:
         """Asynchronously enqueue an inference request for dynamic batching.
 
         Args:
             input_data: Input tensor, NumPy array, or nested sequence.
+            timeout_ms: Optional maximum request execution deadline in milliseconds.
 
         Returns:
             InferenceFuture handle for retrieving prediction results.
@@ -466,7 +532,9 @@ class InferenceScheduler:
                 request_id=req_id,
                 input_tensor=x_2d,
                 submission_time_ns=t_now,
+                timeout_ms=timeout_ms,
             )
+            req.state = RequestState.QUEUED
             self._queue.append(req)
 
             q_len = len(self._queue)
@@ -486,18 +554,22 @@ class InferenceScheduler:
         self,
         input_data: Union[Tensor, np.ndarray, Sequence[Any]],
         timeout: Optional[float] = None,
+        timeout_ms: Optional[float] = None,
     ) -> Tensor:
         """Synchronously enqueue a request, wait for dynamic batch execution, and return results.
 
         Args:
             input_data: Input tensor, NumPy array, or nested sequence.
             timeout: Optional maximum wait time in seconds.
+            timeout_ms: Optional maximum wait time in milliseconds.
 
         Returns:
             Output Tensor representing prediction results.
         """
-        future = self.submit(input_data)
-        return future.result(timeout=timeout)
+        effective_timeout_ms = timeout_ms if timeout_ms is not None else (timeout * 1000.0 if timeout is not None else None)
+        future = self.submit(input_data, timeout_ms=effective_timeout_ms)
+        timeout_sec = (effective_timeout_ms / 1000.0) if effective_timeout_ms is not None else timeout
+        return future.result(timeout=timeout_sec)
 
     def flush(self) -> None:
         """Explicitly notify worker to immediately process all currently pending requests."""
@@ -545,11 +617,22 @@ class InferenceScheduler:
             batch_to_run: List[InferenceRequest] = []
 
             with self._cv:
-                # 1. Clean up cancelled requests at head of queue
-                while self._queue and self._queue[0].is_cancelled:
-                    _ = self._queue.popleft()
-                    with self._stats_lock:
-                        self._cancelled_requests += 1
+                # 1. Clean up cancelled or expired requests at head of queue
+                while self._queue:
+                    cand = self._queue[0]
+                    if cand.is_cancelled:
+                        self._queue.popleft()
+                        with self._stats_lock:
+                            self._cancelled_requests += 1
+                        self._metrics.record_cancellation()
+                    elif cand.is_expired():
+                        self._queue.popleft()
+                        cand.expire()
+                        with self._stats_lock:
+                            self._failed_requests += 1
+                        self._metrics.record_timeout()
+                    else:
+                        break
 
                 # 2. Check shutdown conditions
                 if self._state == SchedulerLifecycleState.CLOSED:
@@ -578,7 +661,7 @@ class InferenceScheduler:
                 # - Batch capacity filled by accumulated samples
                 total_samples = 0
                 for r in self._queue:
-                    if not r.is_cancelled:
+                    if not r.is_cancelled and not r.is_expired():
                         total_samples += r.batch_size
 
                 should_dispatch = (
@@ -603,6 +686,14 @@ class InferenceScheduler:
                         self._queue.popleft()
                         with self._stats_lock:
                             self._cancelled_requests += 1
+                        self._metrics.record_cancellation()
+                        continue
+                    if candidate.is_expired():
+                        self._queue.popleft()
+                        candidate.expire()
+                        with self._stats_lock:
+                            self._failed_requests += 1
+                        self._metrics.record_timeout()
                         continue
 
                     if first_req is None:

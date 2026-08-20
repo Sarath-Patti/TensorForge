@@ -20,6 +20,14 @@ from tensorforge.inference.observability import (
     MetricsCollector,
     PerformanceSnapshot,
 )
+from tensorforge.inference.reliability import (
+    CircuitBreaker,
+    CircuitBreakerConfig,
+    CircuitState,
+    HealthState,
+    RetryConfig,
+    compute_backoff_delay_sec,
+)
 from tensorforge.inference.runtime import InferenceRuntime
 from tensorforge.inference.scheduler import (
     InferenceFuture,
@@ -29,14 +37,20 @@ from tensorforge.inference.scheduler import (
 from tensorforge.serialization.format import LIBRARY_VERSION
 from tensorforge.tensor.tensor import Tensor
 from tensorforge.utils.validation import (
+    CircuitBreakerOpenError,
     ModelAlreadyLoadedError,
+    ModelDegradedError,
     ModelLoadError,
     ModelNotFoundError,
     ModelNotReadyError,
     ModelVersionNotFoundError,
+    RequestCancelledError,
+    RequestDeadlineExceededError,
+    RetryLimitExceededError,
     ServerClosedError,
     ServerError,
     ServerLimitError,
+    TensorForgeInputError,
 )
 
 
@@ -86,6 +100,9 @@ class ModelEntry:
     state: ModelLifecycleState = ModelLifecycleState.UNLOADED
     runtime: Optional[InferenceRuntime] = None
     scheduler: Optional[InferenceScheduler] = None
+    circuit_breaker: CircuitBreaker = field(default_factory=CircuitBreaker)
+    health_state: HealthState = HealthState.HEALTHY
+    retry_config: RetryConfig = field(default_factory=RetryConfig)
     loaded_at_timestamp: float = field(default_factory=time.time)
     metadata: Dict[str, Any] = field(default_factory=dict)
     is_active: bool = False
@@ -117,6 +134,8 @@ class ModelEntry:
             "version": self.version,
             "path": self.path,
             "state": self.state.value,
+            "health_state": self.health_state.value,
+            "circuit_breaker": self.circuit_breaker.to_dict(),
             "is_active": self.is_active,
             "backend": backend_name,
             "is_compiled": is_compiled,
@@ -491,19 +510,25 @@ class InferenceServer:
         target_version = version if version is not None else self._registry.get_active_version(name)
 
         # 1. Load new model version into temporary entry
-        new_entry = self.load_model(
-            name=name,
-            path=path,
-            version=f"{target_version}-new",
-            active=False,
-            scheduler_config=scheduler_config,
-            runtime_limits=runtime_limits,
-            num_threads=num_threads,
-            backend=backend,
-            compile_input_shape=compile_input_shape,
-            metadata=metadata,
-            overwrite=True,
-        )
+        try:
+            new_entry = self.load_model(
+                name=name,
+                path=path,
+                version=f"{target_version}-new",
+                active=False,
+                scheduler_config=scheduler_config,
+                runtime_limits=runtime_limits,
+                num_threads=num_threads,
+                backend=backend,
+                compile_input_shape=compile_input_shape,
+                metadata=metadata,
+                overwrite=True,
+            )
+        except Exception as e:
+            # Atomic reload failure recovery: target version remains READY and untouched
+            raise ModelLoadError(
+                f"Failed atomic model reload for '{name}:{target_version}'. Existing version remains active. Error: {e}"
+            ) from e
 
         # 2. Swap key to target version
         self._registry.unregister(name, f"{target_version}-new")
@@ -542,6 +567,8 @@ class InferenceServer:
         inputs: Union[Tensor, np.ndarray, Sequence[Any]],
         version: Optional[str] = None,
         timeout: Optional[float] = None,
+        timeout_ms: Optional[float] = None,
+        retry_config: Optional[RetryConfig] = None,
     ) -> Tensor:
         """Synchronously execute inference request through model's scheduler.
 
@@ -550,6 +577,8 @@ class InferenceServer:
             inputs: Input tensor data.
             version: Optional target version string.
             timeout: Maximum execution wait timeout in seconds.
+            timeout_ms: Optional maximum request deadline in milliseconds.
+            retry_config: Optional explicit request retry configuration.
 
         Returns:
             Output Tensor prediction result.
@@ -576,13 +605,57 @@ class InferenceServer:
                 f"Model '{entry.name}' version '{entry.version}' is not in READY state (current: {entry.state.value})."
             )
 
-        return entry.scheduler.predict(inputs, timeout=timeout)
+        if not entry.circuit_breaker.allow_request():
+            raise CircuitBreakerOpenError(
+                f"Circuit breaker for model '{entry.name}:{entry.version}' is OPEN."
+            )
+
+        effective_timeout_ms = timeout_ms if timeout_ms is not None else (timeout * 1000.0 if timeout is not None else None)
+        effective_retry_config = retry_config if retry_config is not None else entry.retry_config
+        start_monotonic = time.monotonic()
+        deadline = (start_monotonic + (effective_timeout_ms / 1000.0)) if effective_timeout_ms is not None else None
+
+        attempts = 0
+        max_retries = effective_retry_config.max_retries if effective_retry_config else 0
+
+        while True:
+            try:
+                rem_timeout_ms = None
+                if deadline is not None:
+                    rem_sec = deadline - time.monotonic()
+                    if rem_sec <= 0.0:
+                        raise RequestDeadlineExceededError(f"Request deadline exceeded for model '{entry.name}:{entry.version}'.")
+                    rem_timeout_ms = rem_sec * 1000.0
+
+                result = entry.scheduler.predict(inputs, timeout_ms=rem_timeout_ms)
+                entry.circuit_breaker.record_success()
+                return result
+
+            except Exception as e:
+                # Do not record failures or retry client input validation errors
+                if isinstance(e, (TensorForgeInputError, ValueError, TypeError)):
+                    raise
+
+                entry.circuit_breaker.record_failure()
+                entry.health_state = HealthState.DEGRADED
+
+                if attempts < max_retries and effective_retry_config.is_retryable(e):
+                    attempts += 1
+                    delay_sec = compute_backoff_delay_sec(attempts - 1, effective_retry_config)
+                    if deadline is not None and time.monotonic() + delay_sec >= deadline:
+                        raise RequestDeadlineExceededError(
+                            f"Request deadline exceeded during retry backoff for model '{entry.name}:{entry.version}'."
+                        ) from e
+                    time.sleep(delay_sec)
+                else:
+                    raise
 
     def submit(
         self,
         model: str,
         inputs: Union[Tensor, np.ndarray, Sequence[Any]],
         version: Optional[str] = None,
+        timeout_ms: Optional[float] = None,
     ) -> InferenceFuture:
         """Asynchronously submit inference request to model's scheduler.
 
@@ -590,6 +663,7 @@ class InferenceServer:
             model: Registered model name.
             inputs: Input tensor data.
             version: Optional target version string.
+            timeout_ms: Optional deadline in milliseconds.
 
         Returns:
             InferenceFuture object for asynchronous result retrieval.
@@ -616,7 +690,12 @@ class InferenceServer:
                 f"Model '{entry.name}' version '{entry.version}' is not in READY state (current: {entry.state.value})."
             )
 
-        return entry.scheduler.submit(inputs)
+        if not entry.circuit_breaker.allow_request():
+            raise CircuitBreakerOpenError(
+                f"Circuit breaker for model '{entry.name}:{entry.version}' is OPEN."
+            )
+
+        return entry.scheduler.submit(inputs, timeout_ms=timeout_ms)
 
     def health(self) -> Dict[str, Any]:
         """Perform a lightweight operational health check on the InferenceServer."""
@@ -633,7 +712,10 @@ class InferenceServer:
                 "name": m.name,
                 "version": m.version,
                 "state": m.state.value,
+                "health_state": m.health_state.value,
+                "circuit_state": m.circuit_breaker.state.value,
                 "is_active": m.is_active,
+                "circuit_breaker": m.circuit_breaker.to_dict(),
                 "scheduler_health": sched_health,
             }
 
@@ -729,19 +811,22 @@ class InferenceServer:
                 m.scheduler.reset_metrics()
         return self
 
-    def close(self, drain_timeout: Optional[float] = None) -> None:
-        """Shutdown the InferenceServer cleanly."""
+    def close(self, timeout_ms: Optional[float] = 5000.0) -> None:
+        """Shutdown the InferenceServer cleanly within a monotonic timeout."""
         with self._lock:
             if self._state == ServerLifecycleState.CLOSED:
                 return
             self._state = ServerLifecycleState.DRAINING
+
+        deadline = (time.monotonic() + (timeout_ms / 1000.0)) if timeout_ms is not None else None
 
         entries = self._registry.clear()
         for entry in entries:
             entry.state = ModelLifecycleState.DRAINING
             try:
                 if entry.scheduler is not None:
-                    entry.scheduler.close()
+                    rem_sec = max(0.0, deadline - time.monotonic()) if deadline is not None else None
+                    entry.scheduler.close(drain=(rem_sec is None or rem_sec > 0.0))
                 if entry.runtime is not None and entry.owner:
                     entry.runtime.close()
             except Exception:

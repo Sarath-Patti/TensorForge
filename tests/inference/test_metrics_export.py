@@ -4,6 +4,7 @@ import json
 import os
 import tempfile
 import unittest
+import tensorforge as tf
 from tensorforge.inference.observability import MetricsCollector
 
 
@@ -29,7 +30,7 @@ class TestMetricsExport(unittest.TestCase):
             self.assertIn("batches", data)
             self.assertIn("latency", data)
             self.assertEqual(data["requests"]["completed"], 1)
-            self.assertEqual(data["tensorforge_version"], "1.8.0")
+            self.assertEqual(data["tensorforge_version"], tf.__version__)
 
 
 if __name__ == "__main__":

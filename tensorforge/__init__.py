@@ -125,6 +125,11 @@ from tensorforge.utils.validation import (
     ModelNotReadyError,
     ModelVersionNotFoundError,
     QuantizationError,
+    CircuitBreakerOpenError,
+    ModelDegradedError,
+    RequestCancelledError,
+    RequestDeadlineExceededError,
+    RetryLimitExceededError,
     RuntimeBusyError,
     RuntimeClosedError,
     RuntimeLimitError,
@@ -144,7 +149,7 @@ from tensorforge.utils.validation import (
     TensorForgeInputError,
 )
 
-__version__ = "1.8.0"
+__version__ = "1.9.0"
 
 __all__ = [
     "__version__",
@@ -300,4 +305,9 @@ __all__ = [
     "SchedulerClosedError",
     "ExecutionContextError",
     "ConcurrencyError",
+    "RequestDeadlineExceededError",
+    "RequestCancelledError",
+    "CircuitBreakerOpenError",
+    "ModelDegradedError",
+    "RetryLimitExceededError",
 ]

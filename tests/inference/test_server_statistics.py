@@ -24,7 +24,7 @@ class TestServerStatistics(unittest.TestCase):
                 self.assertEqual(stats["total_models"], 1)
                 self.assertEqual(stats["submitted_requests"], 1)
                 self.assertEqual(stats["completed_requests"], 1)
-                self.assertEqual(stats["tensorforge_version"], "1.8.0")
+                self.assertEqual(stats["tensorforge_version"], tf.__version__)
                 self.assertIn("m1:1", stats["models"])
 
 

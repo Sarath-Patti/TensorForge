@@ -276,6 +276,10 @@ class SchedulerMetrics:
         return asdict(self)
 
 
+from tensorforge.inference.reliability import ReliabilityMetrics
+from tensorforge.serialization.format import LIBRARY_VERSION
+
+
 @dataclass(frozen=True)
 class PerformanceSnapshot:
     """Immutable, unified diagnostic and performance analytics snapshot."""
@@ -288,6 +292,7 @@ class PerformanceSnapshot:
     compiler: CompilerMetrics
     memory: MemoryMetrics
     scheduler: Optional[SchedulerMetrics] = None
+    reliability: Optional[ReliabilityMetrics] = None
     timestamp: float = field(default_factory=time.time)
     tensorforge_version: str = LIBRARY_VERSION
 
@@ -306,6 +311,8 @@ class PerformanceSnapshot:
         }
         if self.scheduler is not None:
             d["scheduler"] = self.scheduler.to_dict()
+        if self.reliability is not None:
+            d["reliability"] = self.reliability.to_dict()
         return d
 
     def to_json(self, indent: int = 2) -> str:
@@ -414,6 +421,88 @@ class MetricsCollector:
         # Scheduler metadata
         self._scheduler_metrics: Optional[SchedulerMetrics] = None
 
+        # Reliability counters
+        self._rejections: int = 0
+        self._timeouts: int = 0
+        self._cancellations: int = 0
+        self._circuit_open_rejections: int = 0
+        self._circuit_rejections: int = 0
+        self._circuit_transitions: int = 0
+        self._retries: int = 0
+        self._recovery_attempts: int = 0
+        self._recovery_successes: int = 0
+        self._recovery_failures: int = 0
+        self._resource_exhaustion_count: int = 0
+        self._execution_failures: int = 0
+        self._shutdown_cancellations: int = 0
+
+    def record_timeout(self) -> None:
+        """Record request timeout event."""
+        with self._lock:
+            self._timeouts += 1
+            self._failed += 1
+            if self._active > 0:
+                self._active -= 1
+
+    def record_cancellation(self, is_shutdown: bool = False) -> None:
+        """Record request cancellation event."""
+        with self._lock:
+            self._cancellations += 1
+            self._cancelled += 1
+            if is_shutdown:
+                self._shutdown_cancellations += 1
+            if self._active > 0:
+                self._active -= 1
+
+    def record_circuit_open_rejection(self) -> None:
+        """Record request rejection due to OPEN circuit breaker."""
+        with self._lock:
+            self._circuit_open_rejections += 1
+            self._circuit_rejections += 1
+            self._rejected += 1
+            self._rejections += 1
+            if self._active > 0:
+                self._active -= 1
+
+    def record_retry(self) -> None:
+        """Record request retry attempt."""
+        with self._lock:
+            self._retries += 1
+
+    def record_resource_exhaustion(self) -> None:
+        """Record resource exhaustion rejection event."""
+        with self._lock:
+            self._resource_exhaustion_count += 1
+            self._rejected += 1
+            self._rejections += 1
+            if self._active > 0:
+                self._active -= 1
+
+    def record_circuit_transition(self) -> None:
+        """Record a circuit breaker state transition."""
+        with self._lock:
+            self._circuit_transitions += 1
+
+    def record_recovery_attempt(self) -> None:
+        """Record a probing recovery attempt in HALF_OPEN state."""
+        with self._lock:
+            self._recovery_attempts += 1
+
+    def record_recovery_success(self) -> None:
+        """Record a successful recovery probe in HALF_OPEN state."""
+        with self._lock:
+            self._recovery_successes += 1
+
+    def record_recovery_failure(self) -> None:
+        """Record a failed recovery probe in HALF_OPEN state."""
+        with self._lock:
+            self._recovery_failures += 1
+
+    def record_execution_failure(self) -> None:
+        """Record an execution failure event."""
+        with self._lock:
+            self._execution_failures += 1
+
     def record_request_submitted(self, queue_depth: int = 0) -> None:
         """Record an incoming request submission."""
         with self._lock:
@@ -454,6 +543,7 @@ class MetricsCollector:
         """Record a rejected request (e.g. queue full, resource limit)."""
         with self._lock:
             self._rejected += 1
+            self._rejections += 1
             if self._active > 0:
                 self._active -= 1
 
@@ -651,6 +741,22 @@ class MetricsCollector:
                 model_size_bytes=self._model_size_bytes,
             )
 
+            # 8. Reliability metrics
+            reliability_metrics = ReliabilityMetrics(
+                timeouts=self._timeouts,
+                cancellations=self._cancellations,
+                rejections=self._rejections,
+                circuit_open_rejections=self._circuit_open_rejections,
+                circuit_transitions=self._circuit_transitions,
+                retries=self._retries,
+                recovery_attempts=self._recovery_attempts,
+                recovery_successes=self._recovery_successes,
+                recovery_failures=self._recovery_failures,
+                resource_exhaustion_count=self._resource_exhaustion_count,
+                execution_failures=self._execution_failures,
+                shutdown_cancellations=self._shutdown_cancellations,
+            )
+
             return PerformanceSnapshot(
                 requests=req_metrics,
                 batches=batch_metrics,
@@ -660,6 +766,7 @@ class MetricsCollector:
                 compiler=compiler_metrics,
                 memory=memory_metrics,
                 scheduler=self._scheduler_metrics,
+                reliability=reliability_metrics,
                 timestamp=time.time(),
                 tensorforge_version=LIBRARY_VERSION,
             )
@@ -711,3 +818,17 @@ class MetricsCollector:
             self._parameter_bytes = 0
             self._model_size_bytes = 0
             self._scheduler_metrics = None
+
+            self._rejections = 0
+            self._timeouts = 0
+            self._cancellations = 0
+            self._circuit_open_rejections = 0
+            self._circuit_rejections = 0
+            self._circuit_transitions = 0
+            self._retries = 0
+            self._recovery_attempts = 0
+            self._recovery_successes = 0
+            self._recovery_failures = 0
+            self._resource_exhaustion_count = 0
+            self._execution_failures = 0
+            self._shutdown_cancellations = 0
