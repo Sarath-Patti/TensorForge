@@ -31,6 +31,7 @@ from tensorforge.nn.module import Module
 from tensorforge.nn.sequential import Sequential
 from tensorforge.quantization.quantized_tensor import QuantizedTensor
 from tensorforge.quantization.quantize import qmatmul, quantize
+from tensorforge.serialization.format import LIBRARY_VERSION
 from tensorforge.tensor.dtype import float32
 from tensorforge.tensor.tensor import Tensor
 from tensorforge.utils.validation import (
@@ -548,23 +549,24 @@ class InferenceRuntime:
 
         # Sync compiler cache analytics
         if self._is_compiled and self._compiled_plan is not None:
-            c_stats = InferenceCompiler.cache_stats()
-            self._metrics._cache_hits = c_stats.get("hits", 0)
-            self._metrics._cache_misses = c_stats.get("misses", 0)
-            self._metrics._compile_requests = c_stats.get("total_lookups", 0)
+            c_stats = self.compiler_stats()
+            self._metrics._cache_hits = c_stats.get("cache_hits", 0)
+            self._metrics._cache_misses = c_stats.get("cache_misses", 0)
+            self._metrics._compile_requests = c_stats.get("compilation_count", 0)
 
         # Sync memory analytics
         param_bytes = 0
         try:
             from tensorforge.serialization.checkpoint import compute_model_size
-            param_bytes = compute_model_size(self._model).get("parameter_bytes", 0)
+            m_size = compute_model_size(self._model)
+            param_bytes = m_size.get("total_bytes", m_size.get("parameter_bytes", 0))
         except Exception:
             pass
 
         self._metrics.record_memory(
             workspace_bytes=self.workspace_size,
             planned_bytes=self.workspace_size,
-            param_bytes=param_bytes,
+            parameter_bytes=param_bytes,
             model_size_bytes=param_bytes,
         )
         return self._metrics.snapshot()
@@ -1167,7 +1169,7 @@ class InferenceRuntime:
             "total_bytes": size_stats["total_bytes"],
             "size_kb": size_stats["size_kb"],
             "format_version": self._metadata.get("format_version", "1.0"),
-            "tensorforge_version": "1.5.0",
+            "tensorforge_version": LIBRARY_VERSION,
         }
 
     def __repr__(self) -> str:

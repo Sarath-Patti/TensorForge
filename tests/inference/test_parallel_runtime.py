@@ -40,7 +40,7 @@ class TestParallelRuntime(unittest.TestCase):
             self.assertEqual(summary["num_threads"], 4)
             self.assertEqual(summary["workspace_regions"], runtime.memory_plan.num_regions)
             self.assertEqual(summary["reused_buffers"], runtime.memory_plan.num_reused_buffers)
-            self.assertEqual(summary["tensorforge_version"], "1.7.0")
+            self.assertEqual(summary["tensorforge_version"], "1.8.0")
 
     def test_runtime_parallel_prediction_parity(self):
         if not is_native_available():

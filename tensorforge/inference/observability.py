@@ -11,6 +11,8 @@ import threading
 import time
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
+from tensorforge.serialization.format import LIBRARY_VERSION
+
 
 class LatencyHistogram:
     """Bounded reservoir for low-overhead latency distribution and percentile estimation.
@@ -287,7 +289,7 @@ class PerformanceSnapshot:
     memory: MemoryMetrics
     scheduler: Optional[SchedulerMetrics] = None
     timestamp: float = field(default_factory=time.time)
-    tensorforge_version: str = "1.7.0"
+    tensorforge_version: str = LIBRARY_VERSION
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert snapshot to a structured dictionary."""
@@ -533,6 +535,7 @@ class MetricsCollector:
         active_bytes: int = 0,
         parameter_bytes: int = 0,
         model_size_bytes: int = 0,
+        param_bytes: int = 0,
     ) -> None:
         """Update workspace and parameter memory telemetry."""
         with self._lock:
@@ -542,8 +545,9 @@ class MetricsCollector:
                 self._planned_workspace_bytes = planned_bytes
             if active_bytes > 0:
                 self._active_workspace_bytes = active_bytes
-            if parameter_bytes > 0:
-                self._parameter_bytes = parameter_bytes
+            p_bytes = parameter_bytes or param_bytes
+            if p_bytes > 0:
+                self._parameter_bytes = p_bytes
             if model_size_bytes > 0:
                 self._model_size_bytes = model_size_bytes
 
@@ -657,7 +661,7 @@ class MetricsCollector:
                 memory=memory_metrics,
                 scheduler=self._scheduler_metrics,
                 timestamp=time.time(),
-                tensorforge_version="1.7.0",
+                tensorforge_version=LIBRARY_VERSION,
             )
 
     def reset(self) -> None:

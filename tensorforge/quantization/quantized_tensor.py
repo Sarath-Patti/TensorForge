@@ -128,6 +128,27 @@ class QuantizedTensor:
         from tensorforge.quantization.quantize import dequantize
         return dequantize(self)
 
+    def transpose(self, *axes: Any) -> QuantizedTensor:
+        """Transpose dimensions of the quantized tensor."""
+        q_transposed = self._qtensor.transpose(*axes)
+        return QuantizedTensor(
+            qdata=q_transposed,
+            scale=self._scale,
+            zero_point=self._zero_point,
+            scheme=self._scheme,
+            orig_dtype=self._orig_dtype,
+            orig_shape=q_transposed.shape,
+        )
+
+    def t(self) -> QuantizedTensor:
+        """Transpose matrix (alias for 2D transpose)."""
+        return self.transpose()
+
+    @property
+    def T(self) -> QuantizedTensor:
+        """Transpose property matrix."""
+        return self.transpose()
+
     def copy(self) -> QuantizedTensor:
         """Create a deep copy of this QuantizedTensor."""
         return QuantizedTensor(
@@ -143,6 +164,11 @@ class QuantizedTensor:
         """Matrix multiplication using INT8 quantized operands."""
         from tensorforge.quantization.quantize import qmatmul
         return qmatmul(self, other)
+
+    def __rmatmul__(self, other: Union[QuantizedTensor, Tensor]) -> Tensor:
+        """Reverse matrix multiplication using INT8 quantized operands."""
+        from tensorforge.quantization.quantize import qmatmul
+        return qmatmul(other, self)
 
     def __repr__(self) -> str:
         shape_str = f"shape={self.shape}"

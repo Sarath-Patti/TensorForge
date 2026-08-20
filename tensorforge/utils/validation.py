@@ -89,6 +89,38 @@ class SchedulerClosedError(SchedulerError, RuntimeClosedError):
     """Raised when an operation is attempted on a closed or draining InferenceScheduler."""
 
 
+class ServerError(TensorForgeError, RuntimeError):
+    """Base exception for InferenceServer operations."""
+
+
+class ModelNotFoundError(ServerError, KeyError):
+    """Raised when a requested model is not registered on the InferenceServer."""
+
+
+class ModelVersionNotFoundError(ServerError, KeyError):
+    """Raised when a requested version of a model is not found."""
+
+
+class ModelAlreadyLoadedError(ServerError, ValueError):
+    """Raised when registering a model version that already exists without replacement."""
+
+
+class ModelNotReadyError(ServerError, RuntimeError):
+    """Raised when an operation is requested on a model that is not in READY state."""
+
+
+class ModelLoadError(ServerError, RuntimeError):
+    """Raised when model loading, initialization, or compilation fails."""
+
+
+class ServerClosedError(ServerError, RuntimeClosedError):
+    """Raised when an operation is attempted on a closed or draining InferenceServer."""
+
+
+class ServerLimitError(ServerError, RuntimeLimitError):
+    """Raised when a request or model exceeds server-level resource limits."""
+
+
 def validate_shape(shape: Any) -> Tuple[int, ...]:
     """Validate and normalize a shape specification.
 

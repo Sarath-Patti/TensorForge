@@ -33,6 +33,14 @@ from tensorforge.inference.scheduler import (
     SchedulerLifecycleState,
     SchedulingPolicy,
 )
+from tensorforge.inference.server import (
+    InferenceServer,
+    ModelEntry,
+    ModelLifecycleState,
+    ModelRegistry,
+    ServerConfig,
+    ServerLifecycleState,
+)
 from tensorforge.inference.shapes import ShapePropagator
 
 __all__ = [
@@ -78,4 +86,10 @@ __all__ = [
     "SchedulerMetrics",
     "PerformanceSnapshot",
     "MetricsCollector",
+    "InferenceServer",
+    "ModelRegistry",
+    "ServerConfig",
+    "ModelLifecycleState",
+    "ServerLifecycleState",
+    "ModelEntry",
 ]

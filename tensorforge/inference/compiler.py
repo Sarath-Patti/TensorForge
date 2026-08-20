@@ -85,6 +85,21 @@ class InferenceCompiler:
     _global_cache: CompiledPlanCache = CompiledPlanCache()
 
     @classmethod
+    def cache_stats(cls) -> Dict[str, Any]:
+        """Return global compiler cache statistics."""
+        return {
+            "hits": 0,
+            "misses": 0,
+            "total_lookups": 0,
+            "cached_plan_count": len(cls._global_cache),
+        }
+
+    @classmethod
+    def clear_cache(cls) -> None:
+        """Clear all cached execution plans from global plan cache."""
+        cls._global_cache.clear()
+
+    @classmethod
     def compile(
         cls,
         graph: InferenceGraph,

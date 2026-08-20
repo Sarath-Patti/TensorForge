@@ -16,6 +16,7 @@ from tensorforge.inference.observability import (
     SchedulerMetrics,
 )
 from tensorforge.inference.runtime import InferenceRuntime
+from tensorforge.serialization.format import LIBRARY_VERSION
 from tensorforge.tensor.dtype import float32
 from tensorforge.tensor.tensor import Tensor
 from tensorforge.utils.validation import (
@@ -774,7 +775,7 @@ class InferenceScheduler:
                 "avg_queue_wait_ms": avg_wait_ms,
                 "avg_batch_execution_ms": avg_exec_ms,
                 "runtime_stats": self._runtime.stats(),
-                "tensorforge_version": "1.7.0",
+                "tensorforge_version": LIBRARY_VERSION,
             }
 
     def performance_snapshot(self) -> PerformanceSnapshot:
@@ -800,24 +801,24 @@ class InferenceScheduler:
         param_bytes = 0
         try:
             from tensorforge.serialization.checkpoint import compute_model_size
-            param_bytes = compute_model_size(self._runtime.model).get("parameter_bytes", 0)
+            m_size = compute_model_size(self._runtime.model)
+            param_bytes = m_size.get("total_bytes", m_size.get("parameter_bytes", 0))
         except Exception:
             pass
 
         self._metrics.record_memory(
             workspace_bytes=self._runtime.workspace_size,
             planned_bytes=self._runtime.workspace_size,
-            param_bytes=param_bytes,
+            parameter_bytes=param_bytes,
             model_size_bytes=param_bytes,
         )
 
         # Sync compiler analytics if active
         if self._runtime.is_compiled:
-            from tensorforge.inference.compiler import InferenceCompiler
-            c_stats = InferenceCompiler.cache_stats()
-            self._metrics._cache_hits = c_stats.get("hits", 0)
-            self._metrics._cache_misses = c_stats.get("misses", 0)
-            self._metrics._compile_requests = c_stats.get("total_lookups", 0)
+            c_stats = self._runtime.compiler_stats()
+            self._metrics._cache_hits = c_stats.get("cache_hits", 0)
+            self._metrics._cache_misses = c_stats.get("cache_misses", 0)
+            self._metrics._compile_requests = c_stats.get("compilation_count", 0)
 
         return self._metrics.snapshot()
 

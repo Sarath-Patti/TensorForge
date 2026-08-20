@@ -29,7 +29,7 @@ class TestMetricsExport(unittest.TestCase):
             self.assertIn("batches", data)
             self.assertIn("latency", data)
             self.assertEqual(data["requests"]["completed"], 1)
-            self.assertEqual(data["tensorforge_version"], "1.7.0")
+            self.assertEqual(data["tensorforge_version"], "1.8.0")
 
 
 if __name__ == "__main__":
