@@ -342,7 +342,7 @@ class InferenceCompiler:
                     estimated_flops=step.estimated_flops,
                     workspace_bytes=plan.total_workspace_bytes,
                     num_threads=step.num_threads,
-                    is_fused=(step.op_type == "FusedLinear"),
+                    is_fused=(step.op_type.startswith("Fused") or step.op_type.startswith("fused") or "fused" in step.backend_dispatch),
                     is_compiled=True,
                     context_id=context.context_id if context is not None else 0,
                     extra=step.attrs,
@@ -351,7 +351,7 @@ class InferenceCompiler:
                 profiler.record_backend_op(
                     backend_dispatch=step.backend_dispatch,
                     duration_ns=duration_ns,
-                    is_fused=(step.op_type == "FusedLinear"),
+                    is_fused=(step.op_type.startswith("Fused") or step.op_type.startswith("fused") or "fused" in step.backend_dispatch),
                 )
             else:
                 step_out = cls._execute_step(step, step_in)

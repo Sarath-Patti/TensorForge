@@ -4,13 +4,10 @@
 
 ---
 
-## Current Milestone: `v2.0 – Production Runtime API & Deployment Foundation`
+## Current Milestone: `v2.1 – Performance Profiling & Operator Bottleneck Analysis`
 
-> **Development Status:** `v2.0 (Production Release)`
-> TensorForge v2.0 formalizes the production-facing runtime API, deployment manifest bootstrapping system, and pre-packaged workload runtime profiles (`LOW_LATENCY`, `HIGH_THROUGHPUT`, `BALANCED`, `EMBEDDED`). It introduces the high-level `InferenceClient` application interface, standardized `InferenceRequestContract` SLA specifications, declarative `DeploymentManifest` JSON loaders (`InferenceServer.from_manifest()`), context manager support, vector/batch prediction helpers, and production diagnostics.
-
-> [!NOTE]
-> `InferenceServer` and `InferenceClient` provide an in-process serving abstraction designed for high-performance Python application integration, embedded inference engines, and framework backends. It is **not** a distributed HTTP/gRPC network daemon, process supervisor, or cloud cluster manager.
+> **Development Status:** `v2.1 (Production Release)`
+> TensorForge v2.1 introduces fine-grained operator-level performance profiling and automated bottleneck analysis. It allows developers and performance engineers to identify inference latency hotspots, execution counts, average/min/max operator timing, percentage of total runtime, backend dispatch distribution (`numpy` vs `native`), tensor shapes, and workspace memory telemetry with zero overhead when disabled.
 
 ---
 
@@ -20,27 +17,27 @@
                     Application
                          │
                          ▼
-                 InferenceClient
+                  InferenceClient
                          │
-                 Request Contract
+                  Request Contract
                          │
                          ▼
-                 InferenceServer
+                  InferenceServer
                          │
-            ┌────────────┴────────────┐
-            │                         │
-        Model Routing            Runtime Config
-            │                         │
-            ▼                         ▼
-      Model Version              Runtime Profile
-            │
-            ▼
-       InferenceRuntime
-            │
-       Compiler / Scheduler
-            │
-            ▼
-       Native / NumPy
+             ┌───────────┴───────────┐
+             │                       │
+         Model Routing          Profiler / Metrics
+             │                       │
+             ▼                       ▼
+       Model Version            Operator Profile
+             │                       │
+             ▼                       ▼
+        InferenceRuntime        Top Bottlenecks
+             │
+        Compiler / Scheduler
+             │
+             ▼
+        Native / NumPy
 ```
 
 ---
@@ -108,6 +105,45 @@ with InferenceServer(config=ServerConfig(max_loaded_models=5)) as server:
     # 8. Unload old model version
     server.unload_model("classifier", version="1")
 ```
+
+---
+
+## Performance Profiling & Bottleneck Analysis
+
+TensorForge provides an opt-in operator-level performance profiler for identifying latency hotspots across eager, fused, compiled, NumPy, and native C++ execution paths.
+
+### Profiler Usage & Context Managers
+
+```python
+import tensorforge as tf
+from tensorforge.inference import InferenceRuntime
+
+runtime = InferenceRuntime.load("model.tfmodel").compile(input_shape=(4, 8))
+
+# 1. Enable profiling via context manager
+profiler = runtime.profiler()
+
+with profiler:
+    for _ in range(50):
+        output = runtime.predict(inputs)
+
+# 2. Inspect PerformanceReport & Top Operator Bottlenecks
+report = profiler.report()
+print(report.summary())
+
+# 3. Print Top Bottlenecks ASCII Table
+print(report.top_bottlenecks_summary(limit=5))
+
+# 4. Access Structured Bottlenecks Data
+bottlenecks = profiler.top_bottlenecks(limit=5)
+for b in bottlenecks:
+    print(f"Op: {b['operator']} | Time: {b['total_time_ms']}ms | Share: {b['percent']}% | Backend: {b['backend']}")
+
+# 5. Export JSON Report
+report.export_json("profile_report.json")
+```
+
+> **Zero Overhead:** Normal inference incurs zero timer or allocation overhead when profiling is disabled.
 
 ---
 
@@ -201,3 +237,6 @@ TensorForge/
 | **v1.6 – Production Inference Scheduling & Dynamic Batching** | **Complete** | InferenceScheduler, SchedulerConfig, dynamic batching, result demultiplexing |
 | **v1.7 – Production Inference Observability & Performance Analytics** | **Complete** | MetricsCollector, PerformanceSnapshot, bounded latency histograms |
 | **v1.8 – Production Inference Serving Layer** | **Complete** | InferenceServer, ModelRegistry, model versioning, routing, failure isolation |
+| **v1.9 – Production Hardening & Reliability** | **Complete** | Request deadlines, explicit cancellation, circuit breakers, retries, failure isolation |
+| **v2.0 – Production Runtime API & Deployment Foundation** | **Complete** | InferenceClient, RuntimeProfiles, DeploymentManifest, ModelEndpoint |
+| **v2.1 – Performance Profiling & Operator Bottleneck Analysis** | **Complete** | Operator profiler, top_bottlenecks, per-operator min/max/avg timing, JSON reports |

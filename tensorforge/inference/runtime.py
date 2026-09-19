@@ -429,6 +429,38 @@ class InferenceRuntime:
         self._profiler.enable(detailed=detailed)
         return self
 
+    def profiler(self, detailed: bool = True) -> RuntimeProfiler:
+        """Access the RuntimeProfiler instance for this runtime and enable profiling.
+
+        Example:
+            >>> profiler = runtime.profiler()
+            >>> with profiler:
+            ...     output = runtime.predict(x)
+            >>> print(profiler.report().top_bottlenecks_summary())
+
+        Args:
+            detailed: Whether to enable detailed per-operator timing (default True).
+
+        Returns:
+            RuntimeProfiler instance.
+        """
+        with self._lifecycle_lock:
+            if self._is_closed:
+                raise RuntimeClosedError("Cannot access profiler: InferenceRuntime has been closed.")
+        self.enable_profiling(detailed=detailed)
+        return self._profiler
+
+    def top_bottlenecks(self, limit: int = 5) -> List[Dict[str, Any]]:
+        """Identify and return the highest-cost operators ranked strictly by execution cost.
+
+        Args:
+            limit: Maximum number of top bottleneck operators to return (default 5).
+
+        Returns:
+            List of operator bottleneck dictionaries.
+        """
+        return self._profiler.top_bottlenecks(limit=limit)
+
     def disable_profiling(self) -> InferenceRuntime:
         """Disable inference runtime profiling and telemetry recording.
 

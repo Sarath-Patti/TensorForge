@@ -173,22 +173,88 @@ class PerformanceReport:
         ]
         return "\n".join(lines)
 
+    def top_bottlenecks(self, limit: int = 5) -> List[Dict[str, Any]]:
+        """Identify and return the highest-cost operators ranked strictly by total execution cost.
+
+        Args:
+            limit: Maximum number of bottleneck operators to return (default 5).
+
+        Returns:
+            List of operator bottleneck descriptors, sorted by total_time_ms descending.
+        """
+        if not self.operation_stats:
+            return []
+
+        total_op_time = sum(info.get("time_ms", 0.0) for info in self.operation_stats.values())
+        results = []
+        for op_name, info in self.operation_stats.items():
+            op_time = info.get("time_ms", 0.0)
+            count = info.get("count", 0)
+            avg_ms = info.get("avg_time_ms", (op_time / count) if count > 0 else 0.0)
+            min_ms = info.get("min_time_ms", avg_ms)
+            max_ms = info.get("max_time_ms", avg_ms)
+            pct = (op_time / total_op_time * 100.0) if total_op_time > 0 else 0.0
+
+            results.append({
+                "operator": op_name,
+                "calls": count,
+                "total_time_ms": round(op_time, 4),
+                "avg_time_ms": round(avg_ms, 4),
+                "min_time_ms": round(min_ms, 4),
+                "max_time_ms": round(max_ms, 4),
+                "percent": round(pct, 1),
+                "backend": info.get("backend", "unknown"),
+                "input_shape": info.get("input_shape", ()),
+                "output_shape": info.get("output_shape", ()),
+                "dtype": info.get("dtype", "float32"),
+                "workspace_bytes": info.get("workspace_bytes", 0),
+            })
+
+        results.sort(key=lambda x: x["total_time_ms"], reverse=True)
+        return results[: max(1, limit)]
+
+    def top_bottlenecks_summary(self, limit: int = 5) -> str:
+        """Produce a formatted human-readable ASCII table of top operator bottlenecks."""
+        bottlenecks = self.top_bottlenecks(limit=limit)
+        lines = [
+            f"Top Operator Bottlenecks (Top {len(bottlenecks)})",
+            "-" * 65,
+            f"{'Operator':<24} {'Calls':<8} {'Total(ms)':<12} {'Avg(ms)':<10} {'% Runtime':<10}",
+            "-" * 65,
+        ]
+        if not bottlenecks:
+            lines.append("  (No operator bottlenecks recorded)")
+            return "\n".join(lines)
+
+        for b in bottlenecks:
+            lines.append(
+                f"{b['operator']:<24} {b['calls']:<8} {b['total_time_ms']:<12.4f} "
+                f"{b['avg_time_ms']:<10.4f} {b['percent']:>6.1f}%"
+            )
+        return "\n".join(lines)
+
     def operation_breakdown(self) -> str:
         """Produce an operation breakdown table."""
-        lines = ["Operations Breakdown", "-" * 60]
+        lines = ["Operations Breakdown", "-" * 65]
         total_op_time = sum(info.get("time_ms", 0.0) for info in self.operation_stats.values())
         if not self.operation_stats or total_op_time == 0:
             lines.append("  (No operation-level events recorded)")
             return "\n".join(lines)
 
-        lines.append(f"{'Operator':<24} {'Count':<8} {'Time (ms)':<12} {'Percent':<10}")
-        lines.append("-" * 60)
+        lines.append(f"{'Operator':<20} {'Calls':<8} {'Total(ms)':<11} {'Avg(ms)':<10} {'Min(ms)':<9} {'Max(ms)':<9} {'Percent':<8}")
+        lines.append("-" * 65)
         sorted_ops = sorted(self.operation_stats.items(), key=lambda x: x[1].get("time_ms", 0.0), reverse=True)
         for op, data in sorted_ops:
             op_time = data.get("time_ms", 0.0)
             op_count = data.get("count", 0)
+            avg_ms = data.get("avg_time_ms", (op_time / op_count) if op_count > 0 else 0.0)
+            min_ms = data.get("min_time_ms", avg_ms)
+            max_ms = data.get("max_time_ms", avg_ms)
             pct = (op_time / total_op_time * 100.0) if total_op_time > 0 else 0.0
-            lines.append(f"{op:<24} {op_count:<8} {op_time:<12.4f} {pct:>6.1f}%")
+            lines.append(
+                f"{op:<20} {op_count:<8} {op_time:<11.4f} {avg_ms:<10.4f} "
+                f"{min_ms:<9.4f} {max_ms:<9.4f} {pct:>6.1f}%"
+            )
         return "\n".join(lines)
 
     def backend_breakdown(self) -> str:
@@ -276,10 +342,22 @@ class PerformanceReport:
             "latency": self.latency_stats,
             "backend": self.backend_stats,
             "operations": self.operation_stats,
+            "bottlenecks": self.top_bottlenecks(limit=10),
             "memory": self.memory_stats,
             "compiler": self.compiler_stats,
             "event_count": len(self.events),
         }
+
+    def to_json(self, indent: int = 2) -> str:
+        """Export full performance diagnostic report as a JSON string."""
+        import json
+        return json.dumps(self.to_dict(), indent=indent)
+
+    def export_json(self, filepath: str, indent: int = 2) -> None:
+        """Save performance diagnostic report to a JSON file."""
+        import json
+        with open(filepath, "w", encoding="utf-8") as f:
+            json.dump(self.to_dict(), f, indent=indent)
 
     def __str__(self) -> str:
         return self.summary()
@@ -361,6 +439,14 @@ class ProfileSession:
         """Generate a PerformanceReport from this session."""
         return self._profiler.generate_report(session_events=self._events)
 
+    def top_bottlenecks(self, limit: int = 5) -> List[Dict[str, Any]]:
+        """Identify and return top bottlenecks from this session."""
+        return self.report().top_bottlenecks(limit=limit)
+
+    def top_bottlenecks_summary(self, limit: int = 5) -> str:
+        """Formatted table of top bottlenecks from this session."""
+        return self.report().top_bottlenecks_summary(limit=limit)
+
 
 class RuntimeProfiler:
     """Thread-safe performance profiler and telemetry accumulator for TensorForge InferenceRuntime."""
@@ -370,6 +456,8 @@ class RuntimeProfiler:
         self._detailed: bool = False
         self._history_size: int = max(10, history_size)
         self._lock: threading.Lock = threading.Lock()
+        self._prev_enabled_ctx: bool = False
+        self._prev_detailed_ctx: bool = False
 
         # Latency & throughput tracking
         self._prediction_count: int = 0
@@ -390,9 +478,16 @@ class RuntimeProfiler:
             "numpy": 0,
         }
 
-        # Operator statistics
+        # Operator statistics & detailed telemetry
         self._op_counts: Dict[str, int] = collections.defaultdict(int)
         self._op_times_ns: Dict[str, int] = collections.defaultdict(int)
+        self._op_min_times_ns: Dict[str, int] = {}
+        self._op_max_times_ns: Dict[str, int] = {}
+        self._op_input_shapes: Dict[str, Tuple[int, ...]] = {}
+        self._op_output_shapes: Dict[str, Tuple[int, ...]] = {}
+        self._op_backends: Dict[str, str] = {}
+        self._op_dtypes: Dict[str, str] = {}
+        self._op_workspace_bytes: Dict[str, int] = collections.defaultdict(int)
 
         # Compiler / cache statistics
         self._compiler_stats: Dict[str, Any] = {
@@ -417,6 +512,31 @@ class RuntimeProfiler:
         with self._lock:
             self._enabled = False
             self._detailed = False
+
+    def start(self, detailed: bool = True) -> RuntimeProfiler:
+        """Start or enable profiling (fluent interface)."""
+        self.enable(detailed=detailed)
+        return self
+
+    def stop(self) -> RuntimeProfiler:
+        """Stop or disable profiling (fluent interface)."""
+        self.disable()
+        return self
+
+    def __enter__(self) -> RuntimeProfiler:
+        """Context manager entry point for enabling profiling."""
+        with self._lock:
+            self._prev_enabled_ctx = self._enabled
+            self._prev_detailed_ctx = self._detailed
+            self._enabled = True
+            self._detailed = True
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        """Context manager exit point for restoring previous profiler state."""
+        with self._lock:
+            self._enabled = self._prev_enabled_ctx
+            self._detailed = self._prev_detailed_ctx
 
     @property
     def is_enabled(self) -> bool:
@@ -461,8 +581,25 @@ class RuntimeProfiler:
             op_key = event.op_type
             if event.is_fused and "activation" in event.extra:
                 op_key = f"{event.op_type}({event.extra['activation'].capitalize()})"
+            dur = event.duration_ns
             self._op_counts[op_key] += 1
-            self._op_times_ns[op_key] += event.duration_ns
+            self._op_times_ns[op_key] += dur
+
+            if op_key not in self._op_min_times_ns or dur < self._op_min_times_ns[op_key]:
+                self._op_min_times_ns[op_key] = dur
+            if op_key not in self._op_max_times_ns or dur > self._op_max_times_ns[op_key]:
+                self._op_max_times_ns[op_key] = dur
+
+            if event.input_shape:
+                self._op_input_shapes[op_key] = event.input_shape
+            if event.output_shape:
+                self._op_output_shapes[op_key] = event.output_shape
+            if event.backend:
+                self._op_backends[op_key] = event.backend
+            if event.dtype:
+                self._op_dtypes[op_key] = event.dtype
+            if event.workspace_bytes:
+                self._op_workspace_bytes[op_key] = max(self._op_workspace_bytes[op_key], event.workspace_bytes)
 
     def record_backend_op(
         self,
@@ -476,7 +613,6 @@ class RuntimeProfiler:
             return
         with self._lock:
             is_native = backend_dispatch.startswith("native")
-            backend_group = "native" if is_native else "numpy"
 
             if is_native:
                 self._backend_ops["native"] += 1
@@ -572,12 +708,25 @@ class RuntimeProfiler:
         """Return aggregated operator-level breakdown."""
         with self._lock:
             res: Dict[str, Any] = {}
+            total_op_ns = sum(self._op_times_ns.values())
             for op, count in self._op_counts.items():
                 time_ms = self._op_times_ns[op] / 1_000_000.0
+                min_ms = (self._op_min_times_ns.get(op, 0)) / 1_000_000.0
+                max_ms = (self._op_max_times_ns.get(op, 0)) / 1_000_000.0
+                avg_ms = (time_ms / count) if count > 0 else 0.0
+                pct = (self._op_times_ns[op] / total_op_ns * 100.0) if total_op_ns > 0 else 0.0
                 res[op] = {
                     "count": count,
-                    "time_ms": time_ms,
-                    "avg_time_ms": (time_ms / count) if count > 0 else 0.0,
+                    "time_ms": round(time_ms, 4),
+                    "avg_time_ms": round(avg_ms, 4),
+                    "min_time_ms": round(min_ms, 4),
+                    "max_time_ms": round(max_ms, 4),
+                    "percent": round(pct, 1),
+                    "backend": self._op_backends.get(op, "unknown"),
+                    "input_shape": self._op_input_shapes.get(op, ()),
+                    "output_shape": self._op_output_shapes.get(op, ()),
+                    "dtype": self._op_dtypes.get(op, "float32"),
+                    "workspace_bytes": self._op_workspace_bytes.get(op, 0),
                 }
             return res
 
@@ -619,6 +768,13 @@ class RuntimeProfiler:
             self._backend_times_ns = {"native": 0, "numpy": 0}
             self._op_counts.clear()
             self._op_times_ns.clear()
+            self._op_min_times_ns.clear()
+            self._op_max_times_ns.clear()
+            self._op_input_shapes.clear()
+            self._op_output_shapes.clear()
+            self._op_backends.clear()
+            self._op_dtypes.clear()
+            self._op_workspace_bytes.clear()
             self._compiler_stats = {
                 "compilation_count": 0,
                 "cache_hits": 0,
@@ -628,9 +784,10 @@ class RuntimeProfiler:
             }
             self._events.clear()
 
-    def reset(self) -> None:
-        """Alias for clear()."""
+    def reset(self) -> RuntimeProfiler:
+        """Alias for clear() with fluent interface return."""
         self.clear()
+        return self
 
     def generate_report(
         self,
@@ -655,3 +812,14 @@ class RuntimeProfiler:
             compiler_stats=comp,
             events=events,
         )
+
+    def report(
+        self,
+        runtime_memory_stats: Optional[Dict[str, Any]] = None,
+    ) -> PerformanceReport:
+        """Generate and return a PerformanceReport (fluent alias)."""
+        return self.generate_report(runtime_memory_stats=runtime_memory_stats)
+
+    def top_bottlenecks(self, limit: int = 5) -> List[Dict[str, Any]]:
+        """Identify and return the highest-cost operators from collected stats."""
+        return self.generate_report().top_bottlenecks(limit=limit)
