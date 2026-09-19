@@ -4,10 +4,10 @@
 
 ---
 
-## Current Milestone: `v2.1 – Performance Profiling & Operator Bottleneck Analysis`
+## Current Milestone: `v2.2 – Performance Optimization Experiments & Throughput Scaling Suite`
 
-> **Development Status:** `v2.1 (Production Release)`
-> TensorForge v2.1 introduces fine-grained operator-level performance profiling and automated bottleneck analysis. It allows developers and performance engineers to identify inference latency hotspots, execution counts, average/min/max operator timing, percentage of total runtime, backend dispatch distribution (`numpy` vs `native`), tensor shapes, and workspace memory telemetry with zero overhead when disabled.
+> **Development Status:** `v2.2 (Production Release)`
+> TensorForge v2.2 establishes a rigorous **BASELINE → OPTIMIZATION → MEASUREMENT → COMPARISON** benchmark and performance analysis methodology. It introduces controlled 4-stage optimization experiments (Baseline, Fusion, Compiled Memory Planning, INT8), batch size scaling (`1..128`), worker thread concurrency scaling with Scaling Efficiency formulas, dynamic batching scaling comparison, and machine-readable JSON report exports.
 
 ---
 
@@ -240,3 +240,89 @@ TensorForge/
 | **v1.9 – Production Hardening & Reliability** | **Complete** | Request deadlines, explicit cancellation, circuit breakers, retries, failure isolation |
 | **v2.0 – Production Runtime API & Deployment Foundation** | **Complete** | InferenceClient, RuntimeProfiles, DeploymentManifest, ModelEndpoint |
 | **v2.1 – Performance Profiling & Operator Bottleneck Analysis** | **Complete** | Operator profiler, top_bottlenecks, per-operator min/max/avg timing, JSON reports |
+| **v2.2 – Performance Optimization Experiments & Throughput Scaling Suite** | **Complete** | Optimization experiment suite (4 stages), throughput scaling, worker concurrency scaling, efficiency formula |
+
+---
+
+## Performance Engineering
+
+TensorForge v2.2 establishes a standardized benchmark workflow for quantifying performance gains across optimization stages and throughput scaling dimensions.
+
+### 1. Optimization Stages Workflow
+
+```
+BASELINE (Eager Execution)
+   │
+   ▼
+OPERATOR FUSION (Pattern Matching)
+   │
+   ▼
+COMPILED EXECUTION (Static Shape & Memory Planning)
+   │
+   ▼
+INT8 QUANTIZATION (Symmetric Linear Quantization)
+```
+
+Each optimization stage is evaluated in isolation against the exact same workload:
+
+- **Stage A: Baseline**: Standard eager execution without operator fusion, compilation, static memory planning, or quantization.
+- **Stage B: Fusion**: Operator fusion pass enabled (e.g. `Linear + ReLU` fusion) while keeping eager execution.
+- **Stage C: Compiled Execution**: Full inference compilation with static shape propagation and interval-based workspace memory reuse.
+- **Stage D: INT8 Quantization**: Symmetric INT8 quantization enabled on compiled memory-planned runtime.
+
+### 2. Primary & Secondary Metrics
+
+- **Primary Metric**: **Throughput** ($\text{samples / second}$)
+  $$\text{Throughput} = \frac{N_{\text{iterations}} \times \text{batch\_size}}{\text{total\_time\_seconds}}$$
+- **Secondary Metrics**:
+  - **Requests per Second**: $N_{\text{requests}} / \text{total\_time\_seconds}$
+  - **Latency Statistics**: Average, P50 (median), P95, Min, Max ($\text{milliseconds}$)
+  - **Memory Footprint**: Peak intermediate memory and persistent workspace size ($\text{bytes}$)
+  - **Speedup Multiplier**: $\text{Throughput}_{\text{optimized}} / \text{Throughput}_{\text{baseline}}$
+  - **Scaling Efficiency**: $\frac{\text{Throughput}_{\text{workers}}}{N_{\text{workers}} \times \text{Throughput}_{1\text{ worker}}}$
+
+### 3. Running Benchmarks & Reproducing Results
+
+```bash
+# 1. Run full 4-stage optimization benchmark suite across small, medium, and large MLPs
+python3 benchmarks/performance_optimization_suite.py
+
+# 2. Run batch size and worker thread concurrency scaling benchmarks
+python3 benchmarks/throughput_scaling.py
+
+# 3. Run complete performance analysis demonstration
+python3 examples/performance_analysis_demo.py
+```
+
+### 4. Machine-Readable Results Schema
+
+Benchmark runs export machine-readable JSON reports matching the schema:
+
+```json
+{
+  "model": "MediumMLP",
+  "batch_size": 8,
+  "mode": "compiled",
+  "throughput_samples_per_sec": 12500.5,
+  "requests_per_sec": 1562.56,
+  "latency_ms": 0.64,
+  "p50_ms": 0.62,
+  "p95_ms": 0.78,
+  "workspace_bytes": 16384,
+  "peak_memory_bytes": 65536,
+  "speedup_vs_baseline": 2.45,
+  "memory_reduction_pct": 52.5
+}
+```
+
+### 5. Measured Results vs Expected Optimization Effects
+
+| Optimization Stage | Expected Effect | How It Is Measured |
+|---|---|---|
+| **Operator Fusion** | Reduced kernel launch overhead and intermediate tensor allocation | Stage B throughput vs Stage A baseline |
+| **Compiled Execution** | Zero graph traversal overhead and deterministic workspace allocation | Stage C throughput and workspace size vs Stage A baseline |
+| **INT8 Quantization** | Lower arithmetic complexity and memory footprint reduction | Stage D throughput and peak memory vs Stage A baseline |
+| **Batch Size Scaling** | Higher arithmetic intensity and device utilization | Throughput across batch sizes $1 \dots 128$ |
+| **Worker Concurrency** | Parallel request throughput across thread pools | Throughput scaling efficiency across 1 to 8 workers |
+
+> **Note on Performance Claims:** TensorForge enforces empirical validation. All reported numbers represent actual benchmark measurements on target runtime hardware rather than fabricated theoretical estimates.
